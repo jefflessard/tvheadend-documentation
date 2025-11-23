@@ -12,10 +12,10 @@ The HTTP server is built on a custom TCP server implementation that handles HTTP
 
 **Location**: `src/http.c`, `src/http.h`
 
-The HTTP server is initialized early in the startup sequence (during pre-fork phase) to bind to privileged ports before dropping privileges. It creates a TCP server that listens for incoming connections and spawns a thread for each client connection.
+The HTTP server is initialized early in the startup sequence (during pre-fork phase) to bind to privileged ports before dropping privileges. It creates a TCP server that listens for incoming connections. Connection handling is delegated to the TCP server layer.
 
 **Key Features:**
-- **Multi-threaded**: One thread per client connection for concurrent request handling
+- **Multi-threaded**: Connection handling uses the TCP server's threading model for concurrent request processing
 - **HTTP/1.0 and HTTP/1.1**: Full support for both protocol versions
 - **Keep-alive**: Persistent connections to reduce overhead
 - **Chunked transfer**: Support for chunked transfer encoding
@@ -113,26 +113,28 @@ The HTTP server initialization occurs in two phases:
 
 **Phase 1: Pre-Fork Initialization** (`http_server_init()`)
 - Called early in startup, before privilege dropping
-- Binds to HTTP port (default 9981)
+- Binds to HTTP port (configured via `tvheadend_webui_port`)
 - Requires root privileges if port < 1024
 - Does not start accepting connections yet
 
 ```c
 void http_server_init(const char *bindaddr)
 {
-  // Create TCP server but don't start yet
-  http_server = tcp_server_create(bindaddr, opt_http_port, 
-                                   http_serve_requests, NULL);
-  
-  // Initialize path registry
-  http_paths = calloc(1, sizeof(http_path_list_t));
-  LIST_INIT(http_paths);
-  
-  // Initialize path registry mutex
-  http_paths_mutex = calloc(1, sizeof(tvh_mutex_t));
-  tvh_mutex_init(http_paths_mutex, NULL);
+  static tcp_server_ops_t ops = {
+    .start  = http_serve,
+    .stop   = NULL,
+    .cancel = http_cancel
+  };
+  RB_INIT(&http_nonces);
+  if (tvheadend_webui_port > 0) {
+    http_server = tcp_server_create(LS_HTTP, "HTTP", bindaddr, 
+                                     tvheadend_webui_port, &ops, NULL);
+    atomic_set(&http_server_running, 1);
+  }
 }
 ```
+
+**Note:** The HTTP path registry and mutex are initialized elsewhere in the codebase, not in `http_server_init()`.
 
 **Phase 2: Server Registration** (`http_server_register()`)
 - Called after all subsystems are initialized
@@ -142,13 +144,11 @@ void http_server_init(const char *bindaddr)
 ```c
 void http_server_register(void)
 {
-  // Start accepting connections
   tcp_server_register(http_server);
-  
-  // Log startup message
-  tvhinfo(LS_HTTP, "HTTP server started on port %d", opt_http_port);
 }
 ```
+
+**Note:** The actual implementation does not log a startup message. Logging may occur elsewhere in the TCP server layer.
 
 #### 15.1.3 HTTP Connection Structure
 
@@ -304,11 +304,11 @@ sequenceDiagram
 
 #### 15.1.5 Connection Management
 
-**Thread-Per-Connection Model:**
-- Each HTTP connection runs in its own thread
-- Thread created by TCP server when connection accepted
-- Thread name: `tvh:http-<client-ip>`
-- Thread lifetime: Duration of connection (may handle multiple requests with keep-alive)
+**Connection Handling Model:**
+- HTTP connections are handled by the TCP server layer
+- The TCP server manages connection lifecycle and threading
+- Connections may handle multiple requests with keep-alive support
+- Thread management details are implemented in the TCP server subsystem
 
 **Connection Lifecycle:**
 ```c
@@ -356,7 +356,7 @@ void http_serve_requests(http_connection_t *hc)
 - HTTP/1.0 requires "Connection: keep-alive" header
 - Reduces overhead of TCP connection establishment
 - Connection reused for multiple requests
-- Timeout: 60 seconds of inactivity
+- Timeout: Configured via connection timeout settings (specific value not documented in HTTP server code)
 
 **Connection Limits:**
 - No hard limit on number of connections
@@ -1815,85 +1815,14 @@ int ipblock_check(struct sockaddr_storage *src)
 
 #### 15.4.6 Access Tickets
 
-**Access Ticket Structure:**
+Tvheadend supports ticket-based authentication for temporary access to resources without embedding credentials. The `http_connection_t` structure includes an `HC_AUTH_TICKET` authentication type, indicating that ticket authentication is implemented.
 
-**Location**: `src/access.h`
+**Ticket Authentication:**
+- Ticket authentication type is defined in the HTTP connection authentication enum
+- Tickets provide temporary, token-based access for streaming URLs
+- Implementation details are handled by the access control subsystem
 
-Access tickets provide temporary, token-based access for streaming URLs without embedding credentials.
-
-```c
-typedef struct access_ticket {
-  char *at_id;                         // Ticket ID (random string)
-  
-  TAILQ_ENTRY(access_ticket) at_link;  // Global list link
-  
-  mtimer_t at_timer;                   // Expiration timer
-  char *at_resource;                   // Resource path
-  access_t *at_access;                 // Access permissions
-} access_ticket_t;
-```
-
-**Ticket Creation:**
-```c
-const char *access_ticket_create(const char *resource, access_t *a)
-{
-  access_ticket_t *at;
-  char buf[64];
-  
-  // Generate random ticket ID
-  uuid_random(buf, sizeof(buf));
-  
-  // Create ticket
-  at = calloc(1, sizeof(access_ticket_t));
-  at->at_id = strdup(buf);
-  at->at_resource = strdup(resource);
-  at->at_access = access_copy(a);
-  
-  // Add to global list
-  TAILQ_INSERT_TAIL(&access_tickets, at, at_link);
-  
-  // Set expiration timer (default: 1 hour)
-  mtimer_arm_rel(&at->at_timer, access_ticket_timeout, at, 
-                 sec2mono(3600));
-  
-  return at->at_id;
-}
-```
-
-**Ticket Verification:**
-```c
-access_t *access_ticket_verify2(const char *id, const char *resource)
-{
-  access_ticket_t *at;
-  
-  // Find ticket by ID
-  TAILQ_FOREACH(at, &access_tickets, at_link) {
-    if (strcmp(at->at_id, id) == 0)
-      break;
-  }
-  
-  if (!at)
-    return NULL;  // Ticket not found
-  
-  // Verify resource matches
-  if (strcmp(at->at_resource, resource) != 0)
-    return NULL;  // Resource mismatch
-  
-  // Return access permissions
-  return at->at_access;
-}
-```
-
-**Ticket Usage Example:**
-```
-1. User authenticates via web UI
-2. User requests stream URL
-3. Server creates ticket: ticket_id = "abc123..."
-4. Server returns URL: /stream/channel/uuid?ticket=abc123...
-5. Client requests stream with ticket
-6. Server verifies ticket and grants access
-7. Ticket expires after 1 hour
-```
+**Note:** The specific data structures and functions for ticket management are not exposed in the public access control API. Ticket creation and verification are implemented internally within the access control subsystem.
 
 #### 15.4.7 Per-Endpoint Access Control
 
@@ -2049,10 +1978,12 @@ Comet long-polling is a technique where the client makes an HTTP request that th
 **Comet Request Flow:**
 
 1. **Client connects**: Web UI sends GET request to `/comet/poll`
-2. **Server waits**: Server holds connection open (up to 30 seconds)
+2. **Server waits**: Server holds connection open (timeout configured in comet implementation)
 3. **Event occurs**: Subsystem generates notification
 4. **Server responds**: Server sends notifications and closes connection
 5. **Client reconnects**: Web UI immediately sends new `/comet/poll` request
+
+**Note:** Specific timeout values are configured in the comet/webui implementation and not exposed in the notification system API.
 
 **Comet Handler Implementation:**
 ```c
@@ -2147,7 +2078,7 @@ typedef struct notify_client {
 1. **Creation**: Client created on first `/comet/poll` request
 2. **Identification**: Client ID stored in cookie or URL parameter
 3. **Activity tracking**: Last activity timestamp updated on each request
-4. **Timeout**: Client deleted after 60 seconds of inactivity
+4. **Timeout**: Client deleted after period of inactivity (timeout configured in comet implementation)
 5. **Cleanup**: Queue flushed, resources freed
 
 **Client ID Management:**
@@ -2196,17 +2127,13 @@ notify_client_t *notify_client_find_or_create(http_connection_t *hc)
 
 ```c
 // Notify by message
-void notify_by_msg(const char *event, htsmsg_t *msg);
-
-// Notify with action
-void notify_by_msg_action(const char *event, const char *action, htsmsg_t *msg);
+void notify_by_msg(const char *class, htsmsg_t *m, int isrestricted, int rewrite);
 
 // Notify reload (full refresh)
-void notify_reload(const char *event);
-
-// Notify title change
-void notify_title_change(const char *event, idnode_t *in);
+void notify_reload(const char *class);
 ```
+
+**Note:** The actual `notify_by_msg()` function signature includes additional parameters for access control (`isrestricted`) and message rewriting (`rewrite`). Other notification functions may exist but were not verified in the examined code.
 
 **Event Generation Example:**
 ```c

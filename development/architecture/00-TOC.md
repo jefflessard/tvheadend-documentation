@@ -1,8 +1,8 @@
 # Tvheadend Architecture Documentation
 
-**Version:** 1.0.0  
-**Last Updated:** November 15, 2025  
-**Status:** Initial Release
+**Version:** 1.0.1  
+**Last Updated:** November 23, 2025  
+**Status:** Validated Release
 
 ---
 

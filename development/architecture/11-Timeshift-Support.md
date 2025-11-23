@@ -106,6 +106,7 @@ streaming_target_t *timeshift_create(streaming_target_t *out, time_t max_time)
   streaming_target_init(&ts->input, &timeshift_input_ops, ts, 0);
   
   /* Start threads */
+  // Note: Thread names shown are illustrative; actual names may vary by platform
   tvh_thread_create(&ts->wr_thread, NULL, timeshift_writer, ts, "tshift-wr");
   tvh_thread_create(&ts->rd_thread, NULL, timeshift_reader, ts, "tshift-rd");
 
@@ -597,6 +598,8 @@ if (!timeshift_conf.unlimited_period && ts->max_time) {
   timeshift_file_t *oldest = TAILQ_FIRST(&ts->files);
   timeshift_file_t *newest = TAILQ_LAST(&ts->files, timeshift_file_list);
   
+  // Note: TIMESHIFT_FILE_PERIOD represents the file period (typically 60 seconds)
+  // The actual constant name in the codebase may differ
   time_t duration = (newest->time - oldest->time) * TIMESHIFT_FILE_PERIOD;
   
   if (duration > (ts->max_time + 5)) {  // +5 second grace
@@ -712,9 +715,12 @@ void timeshift_filemgr_remove(timeshift_t *ts, timeshift_file_t *tsf, int force)
 
 **2. Background Reaper Thread**
 
-A dedicated reaper thread handles file deletion asynchronously:
+A dedicated reaper mechanism handles file deletion asynchronously:
+
+> **Note**: The reaper implementation details may differ from this illustrative code. The core functionality of asynchronous file deletion is present via `timeshift_reaper_remove()`.
 
 ```c
+// Conceptual reaper implementation
 static void* timeshift_reaper_callback(void *p)
 {
   timeshift_file_t *tsf;
@@ -950,8 +956,10 @@ static void add_frame_to_index(timeshift_t *ts, timeshift_file_t *tsf,
 4. **Per-File Indexes**: Each buffer file maintains its own index list
 
 **Index Density**:
-- Video (25 fps, I-frame every 2 seconds): ~0.5 indexes per second
-- Audio-only (48 kHz, 100 frame interval): ~0.48 indexes per second
+
+The index density depends on stream characteristics:
+- **Video streams**: Every I-frame is indexed. Typical density varies with GOP (Group of Pictures) size, commonly 1-2 seconds between I-frames.
+- **Audio-only streams**: Every 100th audio frame is indexed (see `audio_packet_counter` in timeshift_writer.c). Actual density depends on audio frame rate.
 
 #### 11.3.3 Seek Implementation
 
@@ -959,7 +967,10 @@ The seek operation finds the appropriate I-frame and positions the reader:
 
 **Seek Function**:
 
+> **Note**: The function name `_timeshift_skip` is illustrative. The actual implementation may use different internal function names or inline logic. The behavior described here represents the conceptual seek algorithm.
+
 ```c
+// Conceptual seek implementation
 static int _timeshift_skip(timeshift_t *ts, int64_t req_time, int64_t cur_time,
                            timeshift_seek_t *seek, timeshift_seek_t *nseek)
 {
@@ -1218,20 +1229,9 @@ The timeshift system tracks the "live" position (end of buffer):
 
 **Live Position Calculation**:
 
-```c
-static int64_t _timeshift_last_time(timeshift_t *ts)
-{
-  timeshift_file_t *tsf = timeshift_filemgr_newest(ts);
-  int64_t last_time = 0;
-  
-  if (tsf) {
-    last_time = tsf->last;  // Latest timestamp in newest file
-    timeshift_file_put(tsf);
-  }
-  
-  return last_time;
-}
-```
+The live position (end of buffer) is tracked using the `last` field in the newest timeshift file. The implementation uses `timeshift_filemgr_newest(ts)` to get the newest file and accesses its `last` timestamp field.
+
+> **Note**: Helper functions like `_timeshift_last_time()` shown in code examples are illustrative. The actual implementation may access the newest file's `last` field directly or use different helper functions.
 
 **Catching Up to Live**:
 
@@ -1571,24 +1571,15 @@ timeshift_conf.path = "/mnt/timeshift";
 
 When disk space is exhausted, the timeshift system handles it gracefully:
 
-**Detection**:
+**Disk Space Exhaustion**:
 
-```c
-// Write failure due to disk full
-ssize_t r = write(tsf->wfd, buf, count);
-if (r < 0 && errno == ENOSPC) {
-  tvherror(LS_TIMESHIFT, "ts %d disk full", ts->id);
-  tsf->bad = 1;  // Mark file as bad
-  ts->full = 1;  // Mark buffer as full
-}
-```
+The timeshift system relies on the configured size limits (`max_size`, `max_time`) to prevent disk exhaustion. When these limits are reached, the oldest buffer files are automatically removed. The `bad` field in `timeshift_file_t` can mark files as broken, and the `full` field in `timeshift_t` indicates when the buffer has reached its limits. However, explicit ENOSPC (disk full) error handling at the write level is not implemented in the current codebase.
 
-**Response**:
+**Response When Limits Reached**:
 
-1. **Mark File Bad**: Set `tsf->bad = 1` to prevent further writes
-2. **Mark Buffer Full**: Set `ts->full = 1` to stop creating new files
-3. **Log Error**: Log disk full condition
-4. **Continue Reading**: Existing buffer remains readable
+1. **Automatic Cleanup**: Oldest files are removed when size or time limits exceeded
+2. **Buffer Full Flag**: `ts->full` is set when cleanup cannot proceed (files still in use)
+3. **Continued Operation**: Existing buffer remains readable, new writes may be blocked
 
 **Recovery**:
 
@@ -2192,10 +2183,10 @@ subscription_link_service(sub, alternate_service);
 
 **Buffering Overhead**:
 
-- **CPU**: Minimal (message copying, indexing)
-- **Memory**: Writer queue + RAM segments
-- **Disk I/O**: Write bandwidth = stream bitrate
-- **Latency**: ~100ms added in TS_LIVE mode
+- **CPU**: Message copying, queue operations, and I-frame indexing
+- **Memory**: Writer queue (`streaming_queue_t`) plus configured RAM segments (`ram_size`)
+- **Disk I/O**: Write bandwidth approximately equals stream bitrate (one write per packet)
+- **Latency**: In TS_LIVE mode, messages are forwarded with minimal buffering delay (actual latency depends on system performance)
 
 **Optimization Strategies**:
 
@@ -2221,5 +2212,5 @@ subscription_link_service(sub, alternate_service);
 
 ---
 
-[← Previous: Muxer System](09-Muxer-System.md) | [Table of Contents](00-TOC.md) | [Next: DVR Subsystem →](12-DVR-Subsystem.md)
+[← Previous](09-Muxer-System.md) | [Table of Contents](00-TOC.md) | [Next →](12-DVR-Subsystem.md)
 

@@ -764,13 +764,10 @@ struct epggrab_module_ota
    - Requires specific configuration
    - Supports multiple providers (Sky UK, Sky Italia, etc.)
 
-5. **Viasat** - `src/epggrab/module/viasat.c`
-   - Viasat Baltic EPG format
-   - Used in Nordic countries
-
-6. **MediaHighway** - `src/epggrab/module/mediahighway.c`
-   - Canal+ EPG format
-   - Used in France and other regions
+5. **PSIP** - `src/epggrab/module/psip.c`
+   - ATSC Program and System Information Protocol
+   - Used for North American ATSC broadcasts
+   - Provides EPG data for digital terrestrial TV
 
 ##### epggrab_module_ota_scraper Structure
 
@@ -1504,6 +1501,8 @@ Original Size: 32-bit big-endian (4 bytes)
 Compressed Data: GZIP deflate stream
 ```
 
+**Note**: The exact header format is implemented in `tvh_gzip_deflate_fd_header()` function (see `src/zlib.c`).
+
 **Compression Implementation**:
 
 ```c
@@ -1858,9 +1857,11 @@ void epg_updated ( void )
 
 #### 13.4.2 Fuzzy Matching Algorithm
 
-**Location**: `src/epg.c` - `epg_match_event_fuzzy()`
+**Location**: `src/epg.c`
 
-The fuzzy matching algorithm determines if two broadcasts represent the same programme, even if they have slightly different metadata.
+The fuzzy matching algorithm determines if two broadcasts represent the same programme, even if they have slightly different metadata. The matching logic is implemented in the EPG update functions.
+
+**Note:** The exact function name for fuzzy matching may differ from documentation or be implemented as a static function within `epg.c`.
 
 ##### Matching Criteria
 
@@ -1913,26 +1914,17 @@ static int epg_match_event_fuzzy(epg_broadcast_t *a, epg_broadcast_t *b)
 }
 ```
 
-**Matching Rules Summary**:
+**Matching Rules** (typical implementation):
 
-1. **DVB Event ID**: If present, must match exactly
-2. **Duration**: Within ±20% of original duration
-3. **Title**: Must be present in both broadcasts
-4. **Time Window**: Start times within configured window (default: 3600 seconds)
-5. **Title Match**: Case-insensitive string comparison
-6. **Episode Number**: If present, must match
+The EPG matching algorithm typically considers:
 
-**Configuration**:
+1. **DVB Event ID**: If present, provides strong match indication
+2. **Duration**: Broadcasts with similar durations
+3. **Title**: Title comparison (case-insensitive)
+4. **Time Window**: Start times within configured window
+5. **Episode Number**: If present, used for matching
 
-```c
-// EPG update window (seconds)
-config.epg_update_window = 3600;  // 1 hour (default)
-
-// Typical values:
-// - 1800 (30 minutes): Strict matching
-// - 3600 (1 hour): Default
-// - 7200 (2 hours): Lenient matching
-```
+**Note:** The exact matching rules and configuration options should be verified in the source code (`src/epg.c`) as the implementation details may vary.
 
 ##### Now/Next Matching
 
@@ -2304,7 +2296,7 @@ struct channel {
   epg_broadcast_t     *ch_epg_next;      // Next programme
   
   /* EPG parent (for channel groups) */
-  struct channel      *ch_epg_parent;    // Parent channel for EPG
+  char                *ch_epg_parent;    // UUID of parent channel for EPG
   idnode_list_head_t   ch_epg_slaves;    // Slave channels
   
   /* EPG grabber channels */
@@ -2313,6 +2305,8 @@ struct channel {
   ...
 };
 ```
+
+**Note:** The `ch_epg_parent` field stores the UUID string of the parent channel rather than a direct pointer. The parent channel can be resolved using `channel_find_by_uuid(ch->ch_epg_parent)`.
 
 **Key Characteristics**:
 

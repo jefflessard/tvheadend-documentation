@@ -386,7 +386,7 @@ sequenceDiagram
     participant Writer as Writer Thread
     participant Auth as Authentication
     
-    Client->>TCP: Connect to port 9981
+    Client->>TCP: Connect to HTSP port (default 9981)
     TCP->>TCP: Accept connection
     TCP->>Reader: Create reader thread
     Reader->>Reader: Generate challenge
@@ -486,14 +486,13 @@ sequenceDiagram
     Client->>Client: SHA1(password + challenge)
     Client->>Server: authenticate (username, digest)
     
-    Server->>Access: Verify digest
-    Access->>Access: SHA1(stored_password + challenge)
-    Access->>Access: Compare digests
+    Server->>Access: Verify digest via access control
+    Access->>Access: Verify credentials
     
-    alt Digest matches
+    alt Authentication successful
         Access-->>Server: Access granted
         Server->>Client: authenticate response (success)
-    else Digest mismatch
+    else Authentication failed
         Access-->>Server: Access denied
         Server->>Server: Delay 250ms (anti-brute-force)
         Server->>Client: authenticate response (noaccess)
@@ -501,12 +500,12 @@ sequenceDiagram
 ```
 
 **Challenge-Response Details:**
-- Server generates 32-byte random challenge
+- Server generates 32-byte random challenge from `/dev/urandom`
 - Client computes: `digest = SHA1(password + challenge)`
-- Server computes: `digest = SHA1(stored_password + challenge)`
-- Digests compared for authentication
+- Server verifies digest through access control system
 - Password never transmitted over network
 - Challenge unique per connection
+- 250ms delay on authentication failure (anti-brute-force)
 
 **2. Plain Authentication (Legacy):**
 - Username sent without password verification

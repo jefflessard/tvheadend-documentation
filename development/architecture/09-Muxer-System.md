@@ -314,7 +314,8 @@ muxer_destroy(muxer);
 ```
 
 **Error Handling**:
-- All operations return 0 on success, negative errno on error
+- All operations return 0 on success, -1 on error
+- Individual muxer implementations may set errno, but the wrapper functions return -1
 - Errors increment `m_errors` counter
 - Some errors are recoverable (e.g., temporary disk full)
 - Fatal errors set `m_eos` flag to prevent further writes
@@ -387,9 +388,11 @@ muxer_t* muxer_create(muxer_config_t *m_cfg, muxer_hints_t *hints)
 
 | Container Type | Muxer Implementation | Description |
 |----------------|---------------------|-------------|
+| `MC_UNKNOWN` | N/A | Unknown/unspecified container type |
 | `MC_PASS` | Pass-Through | Raw pass-through |
 | `MC_RAW` | Pass-Through | Raw MPEG-TS |
 | `MC_MPEGTS` | Pass-Through | MPEG-TS with PSI/SI rewriting |
+| `MC_MPEGPS` | Pass-Through | MPEG Program Stream |
 | `MC_MATROSKA` | Matroska | Native MKV implementation |
 | `MC_WEBM` | Matroska | WebM (subset of Matroska) |
 | `MC_AVMATROSKA` | libav | MKV via FFmpeg |
@@ -1222,6 +1225,9 @@ Modern container formats support multiple audio and subtitle tracks, allowing us
 #### 9.4.2 Audio Track Handling
 
 **Audio Track Structure**:
+
+**Location**: `src/esstream.h` (as `elementary_info_t` embedded in `elementary_stream`)
+
 ```c
 typedef struct elementary_stream {
   int                 es_index;           // Track index
@@ -1245,12 +1251,12 @@ typedef struct elementary_stream {
 ```
 
 **Audio Types**:
-```c
-#define AUDIO_TYPE_UNDEFINED        0x00
-#define AUDIO_TYPE_CLEAN_EFFECTS    0x01  // Clean audio (no effects)
-#define AUDIO_TYPE_HEARING_IMPAIRED 0x02  // For hearing impaired
-#define AUDIO_TYPE_VISUAL_IMPAIRED  0x03  // Audio description
-```
+
+The `es_audio_type` field stores audio type values as defined in DVB standards. Common values include:
+- `0x00`: Undefined
+- `0x01`: Clean effects (normal audio)
+- `0x02`: Hearing impaired
+- `0x03`: Visual impaired (audio description)
 
 **Matroska Audio Track**:
 ```c
@@ -1341,17 +1347,21 @@ Source Stream → Muxer → Container
    - Codec ID: `S_HDMV/PGS` (Matroska)
 
 **Subtitle Track Structure**:
+
+**Location**: `src/esstream.h` (as `elementary_info_t` embedded in `elementary_stream`)
+
 ```c
 typedef struct elementary_stream {
   // ... (same as audio)
   
   // Subtitle-specific fields
-  uint8_t             es_composition_id;   // DVB subtitle composition ID
-  uint8_t             es_ancillary_id;     // DVB subtitle ancillary ID
-  uint16_t            es_teletext_page;    // Teletext page number
-  uint8_t             es_teletext_type;    // Teletext type
+  uint16_t            es_composition_id;   // DVB subtitle composition ID
+  uint16_t            es_ancillary_id;     // DVB subtitle ancillary ID
+  uint16_t            es_parent_pid;       // Parent PID (for teletext-based subtitles)
 } elementary_stream_t;
 ```
+
+**Note**: The actual structure in `src/esstream.h` uses `uint16_t` for composition and ancillary IDs, not `uint8_t`.
 
 **Matroska Subtitle Track**:
 ```c
@@ -1384,25 +1394,14 @@ pmt_add_descriptor(pmt, DESCRIPTOR_SUBTITLING,
 
 **Subtitle Reordering** (Matroska-specific):
 
-DVB subtitles may arrive out of order. Matroska muxer can reorder them for better compatibility:
+The Matroska muxer configuration includes an `m_dvbsub_reorder` option for DVB subtitle handling. Refer to the Matroska muxer implementation (`src/muxer/muxer_mkv.c`) for details on how this option affects subtitle processing.
 
 ```c
 // Configuration
 muxer_config_t cfg = {
   .m_type = MC_MATROSKA,
-  .u.mkv.m_dvbsub_reorder = 1  // Enable reordering
+  .u.mkv.m_dvbsub_reorder = 1  // Enable DVB subtitle reordering
 };
-
-// Implementation
-if (m->mkv_dvbsub_reorder && es->es_type == SCT_DVBSUB) {
-  // Buffer subtitle packets
-  dvbsub_buffer_add(m->dvbsub_buffer, pkt);
-  
-  // Flush when display set is complete
-  if (dvbsub_is_complete(pkt)) {
-    dvbsub_buffer_flush(m->dvbsub_buffer, m->mkv_writer);
-  }
-}
 ```
 
 **Subtitle Format Conversion**:
@@ -1590,89 +1589,15 @@ int muxer_open_file(muxer_t *m, const char *filename)
 - `O_DIRECT`: Direct I/O, bypass page cache (optional)
 
 **Permissions**:
-- Initial: 0600 (rw------) during writing
-- Final: Configured permissions (e.g., 0644) after close
-- Prevents access to incomplete files
+- Files are opened with configured permissions (from `m_file_permissions`)
+- Example: `open(filename, O_WRONLY | O_CREAT | O_TRUNC, m_config.m_file_permissions)`
+- Permissions are set at file creation time
 
 #### 9.5.2 Buffering Mechanisms
 
 **Write Buffering**:
 
-Muxers use internal buffers to batch writes and reduce system call overhead:
-
-```c
-typedef struct muxer_buffer {
-  uint8_t *mb_data;        // Buffer data
-  size_t   mb_size;        // Buffer size
-  size_t   mb_used;        // Bytes used
-  size_t   mb_capacity;    // Total capacity
-} muxer_buffer_t;
-```
-
-**Buffer Initialization**:
-```c
-void muxer_buffer_init(muxer_buffer_t *mb, size_t capacity)
-{
-  mb->mb_data = malloc(capacity);
-  mb->mb_size = 0;
-  mb->mb_used = 0;
-  mb->mb_capacity = capacity;
-}
-```
-
-**Buffered Write**:
-```c
-int muxer_buffer_write(muxer_buffer_t *mb, int fd, const void *data, size_t size)
-{
-  // If data fits in buffer, just copy
-  if (mb->mb_used + size <= mb->mb_capacity) {
-    memcpy(mb->mb_data + mb->mb_used, data, size);
-    mb->mb_used += size;
-    return 0;
-  }
-  
-  // Flush existing buffer
-  if (mb->mb_used > 0) {
-    if (write(fd, mb->mb_data, mb->mb_used) != mb->mb_used)
-      return -errno;
-    mb->mb_used = 0;
-  }
-  
-  // If data is larger than buffer, write directly
-  if (size > mb->mb_capacity) {
-    if (write(fd, data, size) != size)
-      return -errno;
-    return 0;
-  }
-  
-  // Copy to buffer
-  memcpy(mb->mb_data, data, size);
-  mb->mb_used = size;
-  
-  return 0;
-}
-```
-
-**Buffer Flush**:
-```c
-int muxer_buffer_flush(muxer_buffer_t *mb, int fd)
-{
-  if (mb->mb_used == 0)
-    return 0;
-  
-  if (write(fd, mb->mb_data, mb->mb_used) != mb->mb_used)
-    return -errno;
-  
-  mb->mb_used = 0;
-  return 0;
-}
-```
-
-**Buffer Sizes**:
-- Default: 64 KB - 256 KB
-- Larger buffers reduce system call overhead
-- Smaller buffers reduce memory usage
-- Trade-off between performance and latency
+Muxers write data directly to file descriptors without an explicit buffering layer in the core muxer code. Individual muxer implementations may use format-specific buffering internally. The operating system's page cache provides buffering for file writes, which can be controlled through the cache strategy configuration (see Section 9.5.3).
 
 #### 9.5.3 Cache Strategies
 
@@ -1703,6 +1628,8 @@ Tvheadend supports multiple cache strategies to balance performance and data saf
    - Combines sync and don't keep
    - Slowest, but safest
    - Minimal memory usage
+
+**Note**: The cache strategy enum also includes `MC_CACHE_LAST`, which is a sentinel value used internally for bounds checking and iteration.
 
 **Implementation**:
 ```c
@@ -1762,71 +1689,22 @@ cfg.m_cache = MC_CACHE_SYNC;
 cfg.m_cache = MC_CACHE_SYNCDONTKEEP;
 ```
 
-#### 9.5.4 Atomic Write Operations
-
-To prevent corruption from crashes or power failures, Tvheadend uses atomic write operations:
-
-**Temporary File Pattern**:
-```c
-// Write to temporary file
-char temp_filename[PATH_MAX];
-snprintf(temp_filename, sizeof(temp_filename), "%s.tmp", final_filename);
-
-// Open and write to temp file
-int fd = open(temp_filename, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-// ... write data ...
-close(fd);
-
-// Atomically rename to final filename
-if (rename(temp_filename, final_filename) < 0) {
-  unlink(temp_filename);
-  return -errno;
-}
-```
-
-**Benefits**:
-- Incomplete files never have final name
-- Rename is atomic on most filesystems
-- Prevents partial file corruption
-- Easy to detect and clean up temp files
-
-**Limitations**:
-- Requires 2x disk space during write
-- Rename may not be atomic across filesystems
-- Not used for streaming (only for file recordings)
+#### 9.5.4 File Finalization
 
 **Finalization Process**:
-```c
-int muxer_close(muxer_t *m)
-{
-  // Flush any buffered data
-  muxer_buffer_flush(&m->m_buffer, m->m_fd);
-  
-  // Write container trailer/index
-  m->m_write_trailer(m);
-  
-  // Sync to disk
-  if (m->m_config.m_cache >= MC_CACHE_SYNC)
-    fdatasync(m->m_fd);
-  
-  // Set final permissions
-  fchmod(m->m_fd, m->m_config.m_file_permissions);
-  
-  // Close file
-  close(m->m_fd);
-  m->m_fd = -1;
-  
-  // Rename from temp to final (if using temp file)
-  if (m->m_temp_filename) {
-    if (rename(m->m_temp_filename, m->m_final_filename) < 0) {
-      unlink(m->m_temp_filename);
-      return -errno;
-    }
-  }
-  
-  return 0;
-}
-```
+
+When closing a muxer, the following steps are performed:
+
+1. Write container trailer/index (format-specific)
+2. Sync data to disk (if cache strategy requires it)
+3. Close file descriptor
+
+The muxer writes directly to the final filename. Data integrity relies on:
+- Cache strategy configuration (MC_CACHE_SYNC for maximum safety)
+- Operating system's file system journaling
+- Format-specific trailer writing that marks the file as complete
+
+**Note**: Tvheadend does not use temporary files with atomic rename operations in the muxer layer. Files are written directly to their final location.
 
 #### 9.5.5 Error Handling
 
@@ -1858,63 +1736,17 @@ if (bytes_written != size) {
 
 **Error Recovery**:
 
-1. **Retry on Temporary Errors**:
-```c
-int retries = 3;
-while (retries > 0) {
-  ssize_t ret = write(fd, data, size);
-  if (ret == size)
-    return 0;  // Success
-  
-  if (errno == EINTR || errno == EAGAIN) {
-    // Temporary error, retry
-    retries--;
-    usleep(100000);  // Wait 100ms
-    continue;
-  }
-  
-  // Permanent error
-  return -errno;
-}
-return -ETIMEDOUT;
-```
+1. **Error Detection**:
 
-2. **Disk Space Monitoring**:
-```c
-// Check available space before writing
-struct statvfs vfs;
-if (fstatvfs(fd, &vfs) == 0) {
-  uint64_t available = vfs.f_bavail * vfs.f_frsize;
-  uint64_t required = estimated_recording_size;
-  
-  if (available < required + MIN_FREE_SPACE) {
-    tvhwarn(LS_MUXER, "Low disk space: %"PRIu64" MB available", 
-            available / 1024 / 1024);
-    // Optionally stop recording
-  }
-}
-```
+Muxers detect write errors and increment the `m_errors` counter. On fatal errors (EPIPE, ECONNRESET), the `m_eos` flag is set to prevent further writes. Individual muxer implementations handle errors according to their specific requirements.
 
-3. **Graceful Degradation**:
-```c
-// On write error, try to finalize file gracefully
-if (write_error) {
-  tvherror(LS_MUXER, "Write error, attempting graceful close");
-  
-  // Mark end of stream
-  m->m_eos = 1;
-  
-  // Write trailer if possible
-  if (m->m_write_trailer)
-    m->m_write_trailer(m);
-  
-  // Close file
-  close(m->m_fd);
-  
-  // Notify user
-  notify_recording_error(m, "Disk write error");
-}
-```
+2. **Error Handling**:
+
+Muxers handle write errors by incrementing the `m_errors` counter and, for fatal errors, setting the `m_eos` flag. Disk space errors (ENOSPC, EDQUOT) are detected when write operations fail.
+
+3. **Error Propagation**:
+
+Write errors are propagated to the caller through return values. The `m_errors` counter tracks the number of errors encountered. The `m_eos` flag is set for end-of-stream errors (EPIPE, ECONNRESET) to prevent further write attempts.
 
 #### 9.5.6 Performance Optimization
 
@@ -1950,53 +1782,13 @@ void *buffer = aligned_alloc(BLOCK_SIZE, buffer_size);
 size_t padded_size = (size + BLOCK_SIZE - 1) & ~(BLOCK_SIZE - 1);
 ```
 
-**Asynchronous I/O** (Optional):
+**Synchronous I/O**:
 
-Use `aio_write()` for non-blocking writes:
+Muxers use synchronous write operations. The cache strategy configuration controls whether writes are synchronous at the system level (MC_CACHE_SYNC) or use the default system buffering (MC_CACHE_SYSTEM).
 
-```c
-struct aiocb aio;
-memset(&aio, 0, sizeof(aio));
-aio.aio_fildes = fd;
-aio.aio_buf = data;
-aio.aio_nbytes = size;
-aio.aio_offset = offset;
+**File I/O**:
 
-// Start async write
-if (aio_write(&aio) < 0)
-  return -errno;
-
-// Continue processing...
-
-// Wait for completion later
-while (aio_error(&aio) == EINPROGRESS)
-  usleep(1000);
-
-ssize_t ret = aio_return(&aio);
-```
-
-**Direct I/O** (Advanced):
-
-Bypass page cache for very large files:
-
-```c
-// Open with O_DIRECT
-int fd = open(filename, O_WRONLY | O_CREAT | O_DIRECT, 0600);
-
-// Requires aligned buffers and sizes
-void *buffer = aligned_alloc(512, size);
-write(fd, buffer, size);
-```
-
-**Benefits**:
-- Reduces memory pressure
-- Predictable performance
-- Good for very large recordings
-
-**Drawbacks**:
-- More complex (alignment requirements)
-- May be slower for small writes
-- Not supported on all filesystems
+Muxers use standard file I/O with the `open()`, `write()`, and `close()` system calls. The cache strategy configuration (Section 9.5.3) controls how the operating system handles page caching and synchronization.
 
 #### 9.5.7 Chunked Output
 

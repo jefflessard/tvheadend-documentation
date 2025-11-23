@@ -408,10 +408,9 @@ The LinuxDVB input provides native support for DVB hardware using the Linux DVB 
 ```
 mpegts_input
   └─ linuxdvb_frontend (represents one tuner)
-      ├─ linuxdvb_frontend_dvbs (satellite-specific)
-      ├─ linuxdvb_frontend_dvbt (terrestrial-specific)
-      └─ linuxdvb_frontend_dvbc (cable-specific)
 ```
+
+Note: The LinuxDVB frontend implementation exists in `src/input/mpegts/linuxdvb/linuxdvb_frontend.c`, but specific subclasses for different delivery systems (DVB-S, DVB-T, DVB-C) were not found in the codebase. The frontend handles multiple delivery systems through a single class.
 
 **Hardware Detection**:
 ```c
@@ -804,40 +803,48 @@ void mpegts_init(int linuxdvb_mask, int nosatip, str_list_t *satip_client,
                  str_list_t *tsfiles, int tstuners)
 {
   // Register idnode classes
-  idclass_register(&mpegts_input_class);
   idclass_register(&mpegts_network_class);
   idclass_register(&mpegts_mux_class);
+  idclass_register(&mpegts_mux_instance_class);
   idclass_register(&mpegts_service_class);
+  idclass_register(&mpegts_service_raw_class);
   
-  // Initialize subsystems
-  mpegts_pid_init();
-  mpegts_table_init();
+  // Memory info registration
+  memoryinfo_register(&mpegts_input_queue_memoryinfo);
+  memoryinfo_register(&mpegts_input_table_memoryinfo);
   
-  // Initialize input drivers (order matters for priority)
-#if ENABLE_LINUXDVB
-  if (linuxdvb_mask >= 0)
-    linuxdvb_init(linuxdvb_mask);
+  // FastScan init
+  dvb_fastscan_init();
+  
+  // Network scanner
+  mpegts_network_scan_init();
+  
+  // Setup DVB networks
+  dvb_network_init();
+  
+  // Initialize input drivers
+#if ENABLE_TSFILE
+  if(tsfiles->num) {
+    tsfile_init(tstuners ?: tsfiles->num);
+    // Add files...
+  }
 #endif
   
 #if ENABLE_IPTV
   iptv_init();
 #endif
   
+#if ENABLE_LINUXDVB
+  linuxdvb_init(linuxdvb_mask);
+#endif
+  
 #if ENABLE_SATIP_CLIENT
-  if (!nosatip)
-    satip_client_init(satip_client);
-#endif
-  
-#if ENABLE_HDHOMERUN_CLIENT
-  tvhdhomerun_init();
-#endif
-  
-#if ENABLE_TSFILE
-  if (tsfiles)
-    tsfile_init(tsfiles, tstuners);
+  satip_init(nosatip, satip_client);
 #endif
 }
 ```
+
+Note: The actual implementation includes additional initialization steps and registers `mpegts_mux_instance_class` and `mpegts_service_raw_class` which were not shown in the original documentation. The initialization order also differs slightly from what was documented.
 
 #### 5.3.2 Hardware Detection (LinuxDVB)
 
@@ -1502,89 +1509,15 @@ sequenceDiagram
 
 **Discovery Implementation**:
 
-```c
-// 1. PAT callback - creates services
-int dvb_pat_callback(mpegts_table_t *mt, const uint8_t *ptr, int len, int tableid)
-{
-  mpegts_mux_t *mm = mt->mt_mux;
-  
-  // Parse PAT
-  while (len >= 4) {
-    uint16_t sid = (ptr[0] << 8) | ptr[1];
-    uint16_t pmt_pid = ((ptr[2] & 0x1F) << 8) | ptr[3];
-    
-    if (sid == 0) {
-      // NIT PID - handle separately
-    } else {
-      // Create or find service
-      mpegts_service_t *s = mpegts_service_find(mm, sid, pmt_pid, 1, &save);
-      if (s && save)
-        idnode_changed(&s->s_id);
-    }
-    
-    ptr += 4;
-    len -= 4;
-  }
-  
-  return 0;
-}
+The service discovery process uses three main callback functions declared in `src/input/mpegts.h` and implemented in `src/input/mpegts/dvb_psi.c`:
 
-// 2. PMT callback - updates service PIDs
-int dvb_pmt_callback(mpegts_table_t *mt, const uint8_t *ptr, int len, int tableid)
-{
-  mpegts_service_t *s = (mpegts_service_t*)mt->mt_service;
-  
-  // Parse PCR PID
-  uint16_t pcr_pid = ((ptr[8] & 0x1F) << 8) | ptr[9];
-  
-  // Parse elementary streams
-  mpegts_apids_t pids;
-  mpegts_pid_init(&pids);
-  
-  // Add video PIDs
-  // Add audio PIDs
-  // Add subtitle PIDs
-  // Add teletext PIDs
-  
-  // Update service PIDs
-  if (s->s_update_pids)
-    s->s_update_pids(s, &pids);
-  
-  mpegts_pid_done(&pids);
-  return 0;
-}
+1. **PAT callback** (`dvb_pat_callback`) - Creates services by parsing the Program Association Table (PAT) to extract service IDs (SID) and their corresponding PMT PIDs.
 
-// 3. SDT callback - updates service metadata
-int dvb_sdt_callback(mpegts_table_t *mt, const uint8_t *ptr, int len, int tableid)
-{
-  mpegts_mux_t *mm = mt->mt_mux;
-  
-  // Parse SDT entries
-  while (len > 0) {
-    uint16_t sid = (ptr[0] << 8) | ptr[1];
-    
-    // Find service
-    mpegts_service_t *s = mpegts_mux_find_service(mm, sid);
-    if (!s) continue;
-    
-    // Parse service descriptor
-    char *name = extract_service_name(ptr, len);
-    char *provider = extract_provider_name(ptr, len);
-    uint8_t type = extract_service_type(ptr, len);
-    
-    // Update service
-    if (strcmp(s->s_dvb_svcname, name) != 0) {
-      free(s->s_dvb_svcname);
-      s->s_dvb_svcname = name;
-      idnode_changed(&s->s_id);
-    }
-    
-    // ... update other fields ...
-  }
-  
-  return 0;
-}
-```
+2. **PMT callback** (`dvb_pmt_callback`) - Updates service PIDs by parsing the Program Map Table (PMT) to identify video, audio, subtitle, and teletext streams for each service.
+
+3. **SDT callback** (`dvb_sdt_callback`) - Updates service metadata by parsing the Service Description Table (SDT) to extract service names, provider names, and service types.
+
+Note: The exact implementation details differ from simplified examples. The actual functions use internal service management APIs that handle service creation, PID management, and metadata updates.
 
 #### 5.4.4 Service-to-Channel Mapping
 
@@ -1633,17 +1566,10 @@ graph LR
 **Mapping Process**:
 
 1. **Automatic Mapping** (during scan):
-   ```c
-   // After service is discovered and named:
-   channel_t *ch = channel_find_by_name(s->s_dvb_svcname);
-   if (!ch) {
-     // Create new channel
-     ch = channel_create(NULL, NULL, s->s_dvb_svcname);
-   }
    
-   // Link service to channel
-   service_mapper_link(s, ch);
-   ```
+   After services are discovered and named during mux scanning, Tvheadend's service mapper automatically creates channels and links them to services. The exact implementation of automatic service-to-channel mapping is handled internally by the service mapper subsystem.
+   
+   Note: The specific functions `channel_find_by_name` and `service_mapper_link` shown in the original example do not exist in the codebase. The actual implementation uses different function names and may have a different structure.
 
 2. **Manual Mapping** (via web UI):
    - User can manually map services to channels
@@ -1768,13 +1694,11 @@ struct tvh_input_stream_stats {
 ```
 
 **Scale Types**:
-```c
-typedef enum {
-  SIGNAL_STATUS_SCALE_UNKNOWN  = 0,
-  SIGNAL_STATUS_SCALE_RELATIVE = 1,  // 0-65535 (0-100%)
-  SIGNAL_STATUS_SCALE_DECIBEL  = 2   // Value * 10000 (e.g., -50.25 dBm = -502500)
-} signal_status_scale_t;
-```
+The `signal_scale` and `snr_scale` fields in `tvh_input_stream_stats_t` indicate how to interpret the signal and SNR values:
+- **Relative scale** (0-65535): Represents 0-100% signal strength/quality
+- **Decibel scale** (value * 10000): Represents dBm or dB units (e.g., -50.25 dBm = -502500)
+
+Note: The actual type definition for these scale fields is not explicitly defined as an enum in the current codebase.
 
 #### 5.5.2 Signal Strength and SNR
 

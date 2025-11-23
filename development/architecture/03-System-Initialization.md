@@ -101,9 +101,8 @@ The parser supports both short (`-h`) and long (`--help`) option formats. Option
 The configuration directory is determined in the following order:
 
 1. **Command-line override**: If `-c, --config` is specified, use that path
-2. **Environment variable**: Check `TVHEADEND_CONFIG` environment variable
-3. **User-specific default**: `~/.hts/tvheadend/` (where `~` is the home directory of the user Tvheadend runs as)
-4. **System-wide default**: `/etc/tvheadend/` (if user-specific doesn't exist)
+2. **User-specific default**: `~/.hts/tvheadend/` (where `~` is the home directory of the user Tvheadend runs as)
+3. **System-wide default**: `/etc/tvheadend/` (if user-specific doesn't exist)
 
 **Important considerations:**
 - If running with `--fork` without specifying `--user` or `--config`, the configuration path may be unexpected (typically root's home directory)
@@ -220,15 +219,16 @@ sequenceDiagram
 
 This phase runs with elevated privileges (typically as root) to perform operations that require special permissions:
 
-1. **Global Mutex Initialization**:
+1. **Global Mutex Declaration**:
    ```c
-   tvh_mutex_init(&fork_lock, NULL);
-   tvh_mutex_init(&global_lock, NULL);
-   tvh_mutex_init(&mtimer_lock, NULL);
-   tvh_mutex_init(&gtimer_lock, NULL);
-   tvh_mutex_init(&tasklet_lock, NULL);
-   tvh_mutex_init(&atomic_lock, NULL);
+   tvh_mutex_t global_lock;
+   tvh_mutex_t mtimer_lock;
+   tvh_mutex_t gtimer_lock;
+   tvh_mutex_t tasklet_lock;
+   tvh_mutex_t fork_lock;
    ```
+   
+   These mutexes are declared as global variables and are explicitly initialized during the early initialization phase using `tvh_mutex_init()` calls.
 
 2. **UUID System**: `uuid_init()` - Initialize UUID generation for configuration objects
 
@@ -277,11 +277,11 @@ The main thread acquires `global_lock` and initializes subsystems in dependency 
 5. **Notification System**: `notify_init()` - Real-time notification infrastructure
 6. **Spawn System**: `spawn_init()` - Process spawning for external programs
 7. **idnode System**: `idnode_init()` - Complete idnode initialization
-8. **Configuration System**: `config_init(opt_nobackup)` - Load configuration from disk
+8. **Configuration System**: `config_init(opt_nobackup == 0)` - Load configuration from disk (parameter indicates whether to perform backup)
 9. **Memory Info**: Register memory tracking classes
 10. **Streaming Engine**: `streaming_init()` - Initialize streaming pad/target system
 11. **Hardware Detection**: `tvh_hardware_init()` - Detect available hardware
-12. **DBus**: `dbus_server_init()` - Initialize DBus integration (optional)
+12. **DBus**: `dbus_server_init(opt_dbus, opt_dbus_session)` - Initialize DBus integration (optional, parameters control whether to use DBus and which bus to use)
 13. **Internationalization**: `intlconv_init()` - Character encoding conversion
 14. **API System**: `api_init()` - REST API infrastructure
 15. **Filesystem Monitor**: `fsmonitor_init()` - Monitor configuration file changes

@@ -111,14 +111,13 @@ Throughout this document, you'll find Mermaid diagrams that visualize system arc
 ### 1.5 Related Documentation
 
 **Official Tvheadend Resources:**
-- **Official Website**: [https://tvheadend.org](https://tvheadend.org)
 - **User Documentation**: [https://docs.tvheadend.org](https://docs.tvheadend.org)
 - **GitHub Repository**: [https://github.com/tvheadend/tvheadend](https://github.com/tvheadend/tvheadend)
 - **Issue Tracker**: [https://github.com/tvheadend/tvheadend/issues](https://github.com/tvheadend/tvheadend/issues)
-- **Forum**: [https://tvheadend.org/projects/tvheadend/boards](https://tvheadend.org/projects/tvheadend/boards)
+- **Forum**: [https://tvheadend.org](https://tvheadend.org)
 
 **Protocol and Standard References:**
-- **HTSP Protocol Documentation**: Available in the Tvheadend repository under `docs/`
+- **HTSP Protocol Documentation**: [https://docs.tvheadend.org/documentation/development/htsp](https://docs.tvheadend.org/documentation/development/htsp)
 - **DVB Standards**: [https://www.dvb.org](https://www.dvb.org)
 - **MPEG-TS Specification**: ISO/IEC 13818-1
 - **SAT>IP Specification**: [https://www.satip.info](https://www.satip.info)
@@ -126,7 +125,6 @@ Throughout this document, you'll find Mermaid diagrams that visualize system arc
 **Development Resources:**
 - **Contributing Guide**: See `CONTRIBUTING.md` in the repository root
 - **Build Instructions**: See `README.md` in the repository root
-- **API Documentation**: Generated from source code comments (see `docs/class/` and `docs/property/`)
 
 **Related Technologies:**
 - **Linux DVB API**: [https://www.linuxtv.org/docs/dvbapi/](https://www.linuxtv.org/docs/dvbapi/)

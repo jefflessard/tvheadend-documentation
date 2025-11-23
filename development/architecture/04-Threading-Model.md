@@ -10,8 +10,9 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 
 #### 4.1.1 Core Threads
 
-**Main Thread** (`main_tid`)
+**Main Thread**
 - **Purpose**: Primary event loop processing wall-clock based timers (gtimers)
+- **Note**: The main thread is the initial process thread; no thread ID variable is stored
 - **Created**: At process startup (the initial process thread)
 - **Priority**: Normal (inherits from parent process)
 - **Key Responsibilities**:
@@ -41,7 +42,7 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 **Monotonic Timer Tick Thread** (`mtimer_tick_tid`)
 - **Purpose**: High-frequency clock updates for monotonic time
 - **Created**: During initialization via `tvh_thread_create()`
-- **Thread Name**: `tvh:mtimer_tick`
+- **Thread Name**: `tvh:mtick`
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Update `__mdispatch_clock` every 100ms
@@ -67,8 +68,8 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 
 **Logging Thread** (`tvhlog_tid`)
 - **Purpose**: Asynchronous log message processing
-- **Created**: Early in initialization via `tvhlog_start()`
-- **Thread Name**: `tvh:tvhlog`
+- **Created**: Early in initialization via `tvhlog_init()`
+- **Thread Name**: `tvh:log`
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Write log messages to stderr, syslog, and log files
@@ -84,7 +85,7 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 **DVB Adapter Threads**
 - **Purpose**: Poll DVB hardware for events and data
 - **Created**: One per active DVB adapter
-- **Thread Name**: `tvh:linuxdvb-<adapter>`
+- **Thread Name**: `tvh:lnxdvb-front`
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Poll DVB device file descriptors
@@ -98,7 +99,7 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 **IPTV Input Threads**
 - **Purpose**: Receive IPTV streams over network
 - **Created**: One per active IPTV mux
-- **Thread Name**: `tvh:iptv-<source>`
+- **Thread Names**: `tvh:iptv`, `tvh:libavinput`, `tvh:iptvfile`, `tvh:rtsp-st` (varies by input type)
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Receive UDP/HTTP streams
@@ -111,7 +112,7 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 **SAT>IP Client Threads**
 - **Purpose**: Communicate with SAT>IP servers
 - **Created**: Per active SAT>IP session
-- **Thread Name**: `tvh:satip-<client>`
+- **Thread Name**: `tvh:satip-front`
 - **Priority**: Normal
 - **Key Responsibilities**:
   - RTSP session management
@@ -123,7 +124,7 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 **HDHomeRun Threads**
 - **Purpose**: Interface with HDHomeRun network tuners
 - **Created**: Per active HDHomeRun device
-- **Thread Name**: `tvh:hdhomerun-<device>`
+- **Thread Names**: `tvh:hdhm-front` (frontend), `tvh:hdhm-disc` (discovery)
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Device discovery and communication
@@ -134,24 +135,23 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 
 #### 4.1.3 Network Service Threads
 
-**HTTP Server Threads**
+**HTTP Server**
 - **Purpose**: Handle HTTP client connections
-- **Created**: One per active HTTP connection
-- **Thread Name**: `tvh:http-<client>`
+- **Architecture**: Event-driven (no per-client threads)
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Process HTTP requests
   - Serve web UI files
   - Handle API calls
   - Stream media to HTTP clients
-- **Execution Model**: Request/response processing
+- **Execution Model**: Event-driven request/response processing
 - **Source**: `src/http.c`
-- **Notes**: Thread pool may be used depending on configuration
+- **Notes**: Uses event-driven architecture rather than per-client threads
 
-**HTSP Server Threads**
-- **Purpose**: Handle HTSP (Home TV Streaming Protocol) client connections
-- **Created**: One per active HTSP connection
-- **Thread Name**: `tvh:htsp-<client>`
+**HTSP Server Thread**
+- **Purpose**: Handle HTSP (Home TV Streaming Protocol) message writing
+- **Created**: Single writer thread for all connections
+- **Thread Name**: `tvh:htsp-write`
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Process HTSP protocol messages
@@ -160,40 +160,42 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
   - Handle authentication
 - **Execution Model**: Message-based protocol processing
 - **Source**: `src/htsp_server.c`
-- **Notes**: Long-lived connections, one thread per client
+- **Notes**: Single writer thread handles message writing for all HTSP client connections
 
 **SAT>IP Server Threads**
 - **Purpose**: Serve streams via SAT>IP protocol
-- **Created**: Per active SAT>IP client session
-- **Thread Name**: `tvh:satip-srv-<client>`
+- **Created**: RTP and RTCP threads for streaming
+- **Thread Names**: `tvh:satip-rtp`, `tvh:satip-rtcp`
 - **Priority**: Normal
 - **Key Responsibilities**:
   - RTSP server functionality
   - RTP stream transmission
+  - RTCP control messages
   - Session management
 - **Execution Model**: Network I/O
-- **Source**: `src/satip/server.c`
+- **Source**: `src/satip/rtp.c`
 
 #### 4.1.4 Subsystem-Specific Threads
 
 **DVR Recording Threads**
 - **Purpose**: Write recorded streams to disk
-- **Created**: One per active recording
-- **Thread Name**: `tvh:dvr-<entry>`
+- **Created**: DVR processing and file monitoring threads
+- **Thread Names**: `tvh:dvr`, `tvh:dvr-inotify`
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Mux and write transport stream data
   - Execute pre/post-processing scripts
   - Monitor disk space
   - Handle recording errors
+  - Monitor recorded files via inotify
 - **Execution Model**: Stream processing with file I/O
 - **Source**: `src/dvr/`
-- **Notes**: May spawn additional threads for transcoding
+- **Notes**: Transcoding uses FFmpeg's internal threading, not separate application threads
 
-**EPG Grabber Threads**
+**EPG Grabber Thread**
 - **Purpose**: Fetch EPG data from external sources
-- **Created**: Per active EPG grabber module
-- **Thread Name**: `tvh:epggrab-<module>`
+- **Created**: Single EPG grabber socket thread
+- **Thread Name**: `tvh:epggrabso`
 - **Priority**: Low
 - **Key Responsibilities**:
   - Download XMLTV data
@@ -202,23 +204,22 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 - **Execution Model**: Periodic fetching with long intervals
 - **Source**: `src/epggrab/`
 
-**Transcoding Threads** (Optional)
+**Transcoding** (Optional)
 - **Purpose**: Transcode streams on-the-fly
-- **Created**: Per active transcoding session
-- **Thread Name**: `tvh:transcode-<profile>`
-- **Priority**: Normal to high (configurable)
+- **Architecture**: Uses FFmpeg's internal threading (no dedicated application threads)
+- **Priority**: Controlled by FFmpeg codec settings
 - **Key Responsibilities**:
   - Decode input streams
   - Encode to target format
   - Buffer and synchronize A/V
-- **Execution Model**: Pipeline processing
+- **Execution Model**: Inline processing via streaming targets
 - **Source**: `src/transcoding/`
-- **Notes**: Only present if transcoding is enabled and configured
+- **Notes**: Transcoding is implemented as streaming targets; FFmpeg handles threading internally
 
-**Timeshift Threads** (Optional)
-- **Purpose**: Manage timeshift buffers
-- **Created**: Per active timeshift session
-- **Thread Name**: `tvh:timeshift-<subscription>`
+**Timeshift Thread** (Optional)
+- **Purpose**: Manage timeshift buffer cleanup
+- **Created**: Single reaper thread for all timeshift sessions
+- **Thread Name**: `tvh:tshift-reap`
 - **Priority**: Normal
 - **Key Responsibilities**:
   - Buffer live streams to disk
@@ -258,8 +259,8 @@ Tvheadend uses a multi-threaded architecture with several specialized threads, e
 | IPTV input | 0-N | Normal | Varies | Per active stream |
 | SAT>IP client | 0-N | Normal | Varies | Per SAT>IP session |
 | HDHomeRun | 0-N | Normal | Varies | Per device |
-| HTTP server | 0-N | Normal | Yes (for API calls) | Per client connection |
-| HTSP server | 0-N | Normal | Yes (for operations) | Per client connection |
+| HTTP server | 0 | Normal | Yes (for API calls) | Event-driven, no per-client threads |
+| HTSP server | 1 | Normal | Yes (for operations) | Single writer thread for all connections |
 | SAT>IP server | 0-N | Normal | Varies | Per client session |
 | DVR recording | 0-N | Normal | Varies | Per active recording |
 | EPG grabber | 0-N | Low | Yes (for updates) | Per grabber module |
@@ -335,7 +336,7 @@ graph TB
         GTIMERS[(gtimer_lock<br/>Global timers)]
         MTIMERS[(mtimer_lock<br/>Monotonic timers)]
         TASKLETS[(tasklet_lock<br/>Task queue)]
-        STREAM[(s_stream_mutex<br/>Per-service streaming)]
+
     end
     
     subgraph "Condition Variables"
@@ -433,7 +434,7 @@ graph TB
 **Message Passing:**
 - Threads communicate through shared data structures protected by locks
 - Streaming data flows through `streaming_pad_t` → `streaming_target_t` connections
-- Each service has a `s_stream_mutex` protecting its streaming state
+- Service state is protected by `global_lock`
 - Configuration changes propagate through the notification system
 
 **Deferred Execution:**
@@ -444,8 +445,7 @@ graph TB
 
 **Lock Acquisition Patterns:**
 - Most threads acquire `global_lock` for accessing shared data structures
-- Input and streaming threads also acquire `s_stream_mutex` per service
-- Lock ordering must be respected: `global_lock` before `s_stream_mutex`
+- Service operations use `global_lock` exclusively
 - Timer locks (`gtimer_lock`, `mtimer_lock`) are independent and can be acquired anytime
 
 **Condition Variable Usage:**
@@ -459,26 +459,26 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant Input as Input Thread<br/>(DVB/IPTV)
-    participant Service as Service<br/>(s_stream_mutex)
+    participant Service as Service<br/>(global_lock)
     participant Descrambler as Descrambler Thread
     participant Subscription as Subscription
     participant Output as Output Thread<br/>(HTSP/HTTP)
     participant DVR as DVR Thread
     
-    Input->>Service: Acquire s_stream_mutex
+    Input->>Service: Acquire global_lock
     Input->>Service: Deliver TS packets
     Service->>Service: Parse PMT, create streams
-    Input->>Service: Release s_stream_mutex
+    Input->>Service: Release global_lock
     
     Service->>Descrambler: Forward ECM packets
     Descrambler->>Descrambler: Request control words
     Descrambler->>Service: Provide decryption keys
     
-    Service->>Service: Acquire s_stream_mutex
+    Service->>Service: Acquire global_lock
     Service->>Service: Descramble packets
     Service->>Subscription: Deliver via streaming_pad
     Service->>DVR: Deliver via streaming_pad
-    Service->>Service: Release s_stream_mutex
+    Service->>Service: Release global_lock
     
     Subscription->>Output: Queue packets
     Output->>Output: Send to client
@@ -488,7 +488,7 @@ sequenceDiagram
 
 **Key observations:**
 1. Input threads read data and deliver to services
-2. Service processing happens under `s_stream_mutex`
+2. Service processing happens under `global_lock`
 3. Descrambling may occur in separate threads or inline
 4. Streaming pad delivers to multiple targets simultaneously
 5. Output threads handle client-specific formatting and transmission
@@ -596,7 +596,7 @@ typedef struct tvh_mutex {
 - **Type**: `tvh_mutex_t`
 - **Scope**: Global
 - **Purpose**: Protects most shared data structures in Tvheadend
-- **Declaration**: `src/main.c`
+- **Declaration**: `src/tvheadend.h`
 - **Protected Resources**:
   - Service list and service state
   - Channel list and channel configuration
@@ -613,17 +613,16 @@ typedef struct tvh_mutex {
   tvh_mutex_unlock(&global_lock);
   ```
 - **Critical Rules**:
-  - MUST be acquired before `s_stream_mutex`
-  - NEVER acquire while holding `s_stream_mutex` (causes deadlock)
   - Timer callbacks execute with `global_lock` already held
   - Keep critical sections short to avoid blocking other threads
+  - Most shared data structures require `global_lock` for access
 - **Notes**: This is the most frequently acquired lock in the system
 
 **mtimer_lock**
 - **Type**: `tvh_mutex_t`
 - **Scope**: Global
 - **Purpose**: Protects the monotonic timer list
-- **Declaration**: `src/main.c`
+- **Declaration**: `src/main.c` (defined), `src/tvheadend.h` (extern declaration)
 - **Protected Resources**:
   - `mtimers` list (LIST_HEAD)
   - `mtimer_running` pointer
@@ -645,7 +644,7 @@ typedef struct tvh_mutex {
 - **Type**: `tvh_mutex_t`
 - **Scope**: Global
 - **Purpose**: Protects the global (wall-clock) timer list
-- **Declaration**: `src/main.c`
+- **Declaration**: `src/main.c` (defined), extern declarations in headers
 - **Protected Resources**:
   - `gtimers` list (LIST_HEAD)
   - `gtimer_running` pointer
@@ -705,13 +704,12 @@ typedef struct tvh_mutex {
 - **Usage Pattern**: Used internally by atomic operation wrappers
 - **Notes**: Not typically used directly by application code
 
-#### 4.3.3 Per-Service Mutex
+#### 4.3.3 Service Synchronization
 
-**s_stream_mutex**
-- **Type**: `tvh_mutex_t`
-- **Scope**: Per-service (member of `service_t` structure)
-- **Purpose**: Protects streaming state for a specific service
-- **Declaration**: `src/service.h` - member of `struct service`
+**Service Locking**
+- **Type**: Uses `global_lock` for service access
+- **Scope**: Global lock protects all service structures
+- **Purpose**: Protects service state and streaming operations
 - **Protected Resources**:
   - Service streaming status (`s_streaming_status`)
   - Elementary stream list (`s_components`)
@@ -722,19 +720,10 @@ typedef struct tvh_mutex {
   ```c
   tvh_mutex_lock(&global_lock);
   service_t *s = find_service(...);
+  // Access service state
   tvh_mutex_unlock(&global_lock);
-  
-  tvh_mutex_lock(&s->s_stream_mutex);
-  // Access service streaming state
-  tvh_mutex_unlock(&s->s_stream_mutex);
   ```
-- **Critical Rules**:
-  - MUST acquire `global_lock` first, then `s_stream_mutex`
-  - NEVER acquire `global_lock` while holding `s_stream_mutex`
-  - Must be held when delivering packets to streaming targets
-  - Must be held when modifying elementary stream list
-  - Can be held for longer periods than `global_lock` (streaming operations)
-- **Notes**: Allows streaming operations to proceed without blocking global data access
+- **Notes**: Service operations are protected by the global_lock; there is no separate per-service mutex
 
 #### 4.3.4 Condition Variables
 
@@ -844,15 +833,15 @@ Tvheadend provides a lock assertion macro for debugging:
 
 **Deadlock Prevention:**
 1. Establish a global lock ordering and follow it consistently
-2. Never acquire `global_lock` while holding `s_stream_mutex`
-3. Use timeouts for lock acquisition in complex scenarios
-4. Consider using tasklets to defer work and avoid lock inversion
+2. Use timeouts for lock acquisition in complex scenarios
+3. Consider using tasklets to defer work and avoid lock inversion
+4. Keep critical sections short to minimize contention
 
 **Performance Considerations:**
 1. Separate locks for independent subsystems (e.g., timer locks)
-2. Per-object locks for fine-grained concurrency (e.g., `s_stream_mutex`)
-3. Lock-free algorithms for high-frequency operations (atomic operations)
-4. Defer expensive operations to tasklet thread
+2. Lock-free algorithms for high-frequency operations (atomic operations)
+3. Defer expensive operations to tasklet thread
+4. Keep critical sections short to reduce lock contention
 
 
 ### 4.4 Locking Hierarchy and Rules
@@ -866,18 +855,15 @@ Locks must be acquired in the following order to prevent deadlocks:
 ```
 Level 1: global_lock
          ↓
-Level 2: s_stream_mutex (per-service)
-         ↓
-Level 3: (other subsystem-specific locks)
+Level 2: (subsystem-specific locks as needed)
 
 Independent: mtimer_lock, gtimer_lock, tasklet_lock, fork_lock, atomic_lock
 ```
 
 **Hierarchy Rules:**
-1. **global_lock → s_stream_mutex**: Always acquire `global_lock` before `s_stream_mutex`
-2. **Never reverse**: NEVER acquire `global_lock` while holding `s_stream_mutex`
-3. **Independent locks**: Timer locks and tasklet_lock can be acquired in any order relative to global_lock
-4. **Same-level locks**: Never acquire multiple `s_stream_mutex` locks simultaneously
+1. **global_lock first**: Always acquire `global_lock` before subsystem-specific locks
+2. **Independent locks**: Timer locks and tasklet_lock can be acquired in any order relative to global_lock
+3. **Avoid nested locks**: Minimize holding multiple locks simultaneously
 
 #### 4.4.2 Correct Locking Patterns
 
@@ -893,30 +879,21 @@ if (s == NULL) {
   return;
 }
 service_ref(s);  // Increment reference count
-tvh_mutex_unlock(&global_lock);
 
-// Now acquire s_stream_mutex for streaming operations
-tvh_mutex_lock(&s->s_stream_mutex);
-// ... perform streaming operations ...
-tvh_mutex_unlock(&s->s_stream_mutex);
+// Perform service operations while holding global_lock
+// ... perform service operations ...
 
-// Release service reference
-tvh_mutex_lock(&global_lock);
 service_unref(s);
 tvh_mutex_unlock(&global_lock);
 ```
 
-❌ **INCORRECT (Deadlock Risk):**
+❌ **INCORRECT (Lock Held Too Long):**
 ```c
-// WRONG: Acquiring global_lock while holding s_stream_mutex
-tvh_mutex_lock(&s->s_stream_mutex);
-// ... streaming operations ...
-
-tvh_mutex_lock(&global_lock);  // DEADLOCK RISK!
-// ... access global data ...
+// WRONG: Holding global_lock for extended operations
+tvh_mutex_lock(&global_lock);
+// ... long-running operations ...
+// This blocks all other threads from accessing shared data
 tvh_mutex_unlock(&global_lock);
-
-tvh_mutex_unlock(&s->s_stream_mutex);
 ```
 
 **Pattern 2: Arming Timers**
@@ -946,26 +923,27 @@ gtimer_disarm(&timer);  // Internally acquires gtimer_lock
 tvh_mutex_unlock(&global_lock);
 ```
 
-**Pattern 4: Using Tasklets to Avoid Lock Inversion**
+**Pattern 4: Using Tasklets for Deferred Work**
 
 ✅ **CORRECT:**
 ```c
-// In a function holding s_stream_mutex that needs global_lock
-tvh_mutex_lock(&s->s_stream_mutex);
-// ... streaming operations ...
+// Use tasklets to defer work that doesn't need immediate execution
+void some_function(void)
+{
+  // Quick operation
+  // ... minimal work ...
 
-// Need to update global state - use tasklet instead
-tasklet_arm(&my_tasklet, update_global_state, opaque);
-
-tvh_mutex_unlock(&s->s_stream_mutex);
+  // Defer expensive work to tasklet thread
+  tasklet_arm(&my_tasklet, deferred_work, opaque);
+}
 
 // Tasklet callback executes later without any locks held
-void update_global_state(void *opaque, int disarmed)
+void deferred_work(void *opaque, int disarmed)
 {
   if (disarmed) return;
   
   tvh_mutex_lock(&global_lock);
-  // ... update global state ...
+  // ... perform deferred work ...
   tvh_mutex_unlock(&global_lock);
 }
 ```
@@ -1009,15 +987,15 @@ service_ref(s);  // No lock held - RACE CONDITION!
 - Document the required lock order in function comments
 - Use `lock_assert()` to verify lock preconditions
 
-**Rule 2: Never Reverse the Hierarchy**
-- NEVER acquire `global_lock` while holding `s_stream_mutex`
-- If you need both locks, acquire `global_lock` first
-- If you already hold `s_stream_mutex`, use tasklets to defer work requiring `global_lock`
+**Rule 2: Keep Critical Sections Short**
+- Minimize time holding `global_lock` to reduce contention
+- Use tasklets to defer expensive work
+- Release locks before performing I/O or blocking operations
 
-**Rule 3: Avoid Holding Multiple Service Locks**
-- Never acquire `s_stream_mutex` for multiple services simultaneously
-- If you need to coordinate multiple services, use `global_lock` only
-- Process services sequentially, not concurrently
+**Rule 3: Use Tasklets for Deferred Work**
+- Defer expensive operations to tasklet thread
+- Tasklet callbacks execute without locks held
+- Useful for avoiding long critical sections
 
 **Rule 4: Release Locks Before Callbacks**
 - Release locks before calling user-provided callbacks
@@ -1041,23 +1019,24 @@ service_ref(s);  // No lock held - RACE CONDITION!
 ❌ **Problem:**
 ```c
 // Thread A
-tvh_mutex_lock(&global_lock);
-tvh_mutex_lock(&s->s_stream_mutex);  // OK
-tvh_mutex_unlock(&s->s_stream_mutex);
-tvh_mutex_unlock(&global_lock);
+tvh_mutex_lock(&lock_a);
+tvh_mutex_lock(&lock_b);
+tvh_mutex_unlock(&lock_b);
+tvh_mutex_unlock(&lock_a);
 
 // Thread B (different code path)
-tvh_mutex_lock(&s->s_stream_mutex);
-tvh_mutex_lock(&global_lock);  // DEADLOCK!
+tvh_mutex_lock(&lock_b);
+tvh_mutex_lock(&lock_a);  // DEADLOCK!
 ```
 
 ✅ **Solution:**
 ```c
-// Thread B - use tasklet to defer work
-tvh_mutex_lock(&s->s_stream_mutex);
-// ... streaming work ...
-tasklet_arm(&tasklet, deferred_work, opaque);
-tvh_mutex_unlock(&s->s_stream_mutex);
+// Thread B - use consistent lock ordering
+tvh_mutex_lock(&lock_a);
+tvh_mutex_lock(&lock_b);
+// ... work ...
+tvh_mutex_unlock(&lock_b);
+tvh_mutex_unlock(&lock_a);
 
 // Tasklet callback
 void deferred_work(void *opaque, int disarmed)
@@ -1078,7 +1057,7 @@ tvh_mutex_unlock(&global_lock);
 
 // Service might be destroyed here by another thread!
 
-tvh_mutex_lock(&s->s_stream_mutex);  // USE-AFTER-FREE!
+// Accessing service without lock - USE-AFTER-FREE!
 ```
 
 ✅ **Solution:**
@@ -1091,9 +1070,7 @@ if (s) {
 tvh_mutex_unlock(&global_lock);
 
 if (s) {
-  tvh_mutex_lock(&s->s_stream_mutex);
-  // ... safe to use service ...
-  tvh_mutex_unlock(&s->s_stream_mutex);
+  // ... safe to use service while holding global_lock ...
   
   tvh_mutex_lock(&global_lock);
   service_unref(s);
@@ -1189,7 +1166,7 @@ This shows:
 #### 4.4.6 Locking Guidelines Summary
 
 **DO:**
-- ✅ Acquire `global_lock` before `s_stream_mutex`
+- ✅ Acquire `global_lock` before accessing services
 - ✅ Use `service_ref()` / `service_unref()` to prevent use-after-free
 - ✅ Check `s_status` for `SERVICE_ZOMBIE` before using service
 - ✅ Use `lock_assert()` to document locking requirements
@@ -1198,16 +1175,15 @@ This shows:
 - ✅ Release locks before calling callbacks (except timer callbacks)
 
 **DON'T:**
-- ❌ Never acquire `global_lock` while holding `s_stream_mutex`
 - ❌ Never access services without holding `global_lock` or a reference
-- ❌ Never hold multiple `s_stream_mutex` locks simultaneously
 - ❌ Never call blocking functions while holding locks
 - ❌ Never assume lock ordering in callback functions
+- ❌ Never hold locks longer than necessary
 - ❌ Never ignore `SERVICE_ZOMBIE` status
 
 **When in Doubt:**
 - Use tasklets to defer work
-- Acquire `global_lock` only, avoid `s_stream_mutex` if possible
+- Keep critical sections short
 - Add `lock_assert()` to verify assumptions
 - Test with `ENABLE_TRACE` and thread debugging enabled
 
@@ -1475,7 +1451,7 @@ The mtimer thread also performs periodic maintenance every second:
 - Must be short and non-blocking
 - Can arm/disarm other timers
 - Can arm/disarm self (for periodic timers)
-- Should not acquire `s_stream_mutex` (lock ordering)
+- Should keep operations minimal and fast
 
 **Re-arming from Callback:**
 ```c
@@ -1504,9 +1480,9 @@ void periodic_callback(void *opaque)
 **DON'T in Timer Callbacks:**
 - ❌ Block or sleep
 - ❌ Perform I/O operations
-- ❌ Acquire `s_stream_mutex` (lock ordering violation)
 - ❌ Call functions that might block
 - ❌ Perform expensive computations
+- ❌ Acquire additional locks (beyond global_lock)
 - ❌ Call callbacks that might acquire locks
 
 **Deferring Work:**
@@ -1770,22 +1746,21 @@ while (tvheadend_is_running()) {
 
 #### 4.6.5 Use Cases
 
-**Use Case 1: Avoiding Lock Inversion**
+**Use Case 1: Deferring Expensive Work**
 
-When holding `s_stream_mutex` and needing to access global state:
+When you need to perform work without blocking:
 
 ```c
-void streaming_function(service_t *s)
+void quick_function(void)
 {
-  tvh_mutex_lock(&s->s_stream_mutex);
+  tvh_mutex_lock(&global_lock);
   
-  // Streaming work...
+  // Quick work...
   
-  // Need to update global state, but can't acquire global_lock
-  // (would violate lock ordering)
-  tasklet_arm(&update_tasklet, update_global_state, s);
+  // Defer expensive work to avoid holding lock too long
+  tasklet_arm(&work_tasklet, expensive_work, opaque);
   
-  tvh_mutex_unlock(&s->s_stream_mutex);
+  tvh_mutex_unlock(&global_lock);
 }
 
 void update_global_state(void *opaque, int disarmed)
@@ -2045,7 +2020,7 @@ void tasklet_callback(void *opaque, int disarmed)
 | **Blocking Allowed** | Yes | No |
 | **Timing** | ASAP (queued) | Scheduled time |
 | **Use Case** | Deferred work | Time-based events |
-| **Lock Restrictions** | None | Can't acquire `s_stream_mutex` |
+| **Lock Restrictions** | None | Must hold global_lock |
 
 **When to Use:**
 - **Tasklet**: Defer work, avoid lock inversion, blocking operations

@@ -16,7 +16,7 @@ The configuration directory (typically `~/.hts/tvheadend/` or `/home/hts/.hts/tv
 
 **Default Configuration Paths:**
 - **Linux**: `~/.hts/tvheadend/`
-- **Custom**: Specified via `-c` or `--config` command-line option
+- **Custom**: Specified via command-line option (path passed to `hts_settings_init()`)
 - **Fallback**: `data/conf/` (bundled default configurations)
 
 **Directory Structure:**
@@ -485,13 +485,12 @@ void hts_settings_save(htsmsg_t *record, const char *pathfmt, ...)
 
 #### 19.1.7 Configuration Migration
 
-Tvheadend includes a sophisticated configuration migration system that handles upgrades between versions, ensuring backward compatibility and smooth transitions.
+Tvheadend includes configuration migration helper functions for upgrading from version 1 configurations. These functions handle specific migration tasks such as converting DVB adapter configurations and channel mappings.
 
-**Migration Triggers:**
-- Version number changes in global configuration
-- Missing or outdated configuration structures
-- Schema changes in idnode classes
-- Deprecated configuration formats
+**Migration Functions:**
+- `config_migrate_v1_dvb_network()` - Converts DVB adapter configurations
+- `config_migrate_v1_dvr()` - Migrates DVR and autorec entries
+- `config_migrate_v1_chn_*()` - Helper functions for channel migration
 
 **Migration Process:**
 
@@ -521,116 +520,34 @@ sequenceDiagram
     Config-->>Main: Initialization complete
 ```
 
-**Version Tracking:**
+**Migration Helper Functions:**
 
-The global configuration file (`config`) contains a version number that tracks the configuration schema version:
+The codebase includes helper functions for migrating version 1 configurations to the current format. These functions are called manually during upgrade processes and handle specific migration tasks.
 
-```json
-{
-  "version": 3,
-  "language": "en_US",
-  "uilevel": 2,
-  ...
-}
-```
+**Available Migration Functions** (`src/config.c`):
 
-**Migration Implementation** (`src/config.c`):
+- `config_migrate_v1_dvb_network()` - Converts DVB adapter and network configurations from v1 format
+- `config_migrate_v1_dvr()` - Migrates DVR recording entries and autorec rules
+- `config_migrate_v1_chn_id_to_uuid()` - Converts channel IDs to UUIDs
+- `config_migrate_v1_chn_name_to_uuid()` - Converts channel names to UUIDs
+- `config_migrate_v1_chn_add_svc()` - Links services to channels during migration
+- `config_migrate_v1_dvb_svcs()` - Migrates DVB service configurations
 
-```c
-void config_init(int backup)
-{
-  htsmsg_t *m;
-  uint32_t current_version = CONFIG_VERSION;
-  uint32_t stored_version;
-  
-  // Load configuration
-  m = hts_settings_load("config");
-  
-  // Get stored version
-  stored_version = htsmsg_get_u32_or_default(m, "version", 0);
-  
-  // Check if migration needed
-  if (stored_version < current_version) {
-    tvhinfo(LS_CONFIG, "Migrating configuration from v%d to v%d",
-            stored_version, current_version);
-    
-    // Backup if requested
-    if (backup) {
-      config_backup();
-    }
-    
-    // Run migrations
-    for (uint32_t v = stored_version + 1; v <= current_version; v++) {
-      config_migrate_version(v);
-    }
-    
-    // Update version
-    config.version = current_version;
-    idnode_changed(&config.idnode);
-  }
-  
-  htsmsg_destroy(m);
-}
-```
+**Migration Process:**
 
-**Common Migration Tasks:**
-1. **Rename properties**: Old property names to new names
-2. **Split/merge objects**: Reorganize configuration structure
-3. **Convert formats**: Change data representation
-4. **Add defaults**: Populate new required fields
-5. **Remove obsolete**: Clean up deprecated configurations
+Migration functions read old configuration files using `hts_settings_load_r()`, transform the data structures, and save them in the new format using `hts_settings_save()`. The migration is typically triggered manually during major version upgrades.
 
-**Example Migration:**
-```c
-static void config_migrate_v2_to_v3(void)
-{
-  htsmsg_t *channels, *m;
-  htsmsg_field_t *f;
-  
-  // Load all channels
-  channels = hts_settings_load_r(1, "channel/config");
-  
-  HTSMSG_FOREACH(f, channels) {
-    m = htsmsg_field_get_map(f);
-    
-    // Migrate: rename "channelname" to "name"
-    const char *old_name = htsmsg_get_str(m, "channelname");
-    if (old_name) {
-      htsmsg_add_str(m, "name", old_name);
-      htsmsg_delete_field(m, "channelname");
-      
-      // Save migrated configuration
-      hts_settings_save(m, "channel/config/%s", f->hmf_name);
-    }
-  }
-  
-  htsmsg_destroy(channels);
-}
-```
+**Configuration Protection:**
 
-**Backup Mechanism:**
+Tvheadend protects configuration files through atomic write operations. When saving configuration files, the system writes to a temporary file first, then atomically renames it to the final name. This ensures that configuration files are never left in a partially written state, even if the system crashes during a write operation.
 
-Before performing migrations, Tvheadend can create a backup of the configuration directory:
+The atomic write process in `hts_settings_save()`:
+1. Write data to `<path>.tmp`
+2. Close the temporary file
+3. Atomically rename `<path>.tmp` to `<path>`
+4. If the write fails, delete the temporary file
 
-```c
-void config_backup(void)
-{
-  char src[PATH_MAX], dst[PATH_MAX];
-  time_t now = time(NULL);
-  
-  snprintf(src, sizeof(src), "%s", hts_settings_get_root());
-  snprintf(dst, sizeof(dst), "%s/backup/config.%ld", 
-           hts_settings_get_root(), (long)now);
-  
-  // Create backup directory
-  hts_settings_makedirs(dst);
-  
-  // Copy configuration files
-  copy_directory_recursive(src, dst);
-  
-  tvhinfo(LS_CONFIG, "Configuration backed up to %s", dst);
-}
-```
+This approach provides crash safety without requiring explicit backup mechanisms.
 
 ### 19.2 Settings System
 
@@ -664,9 +581,10 @@ void hts_settings_init(const char *confpath);
 
 **Behavior:**
 - Called early in startup (before most subsystems)
-- Resolves and stores configuration directory path
-- Creates configuration directory if it doesn't exist
+- Resolves and stores configuration directory path using `realpath()`
 - Sets up global `settingspath` variable
+
+Note: The function does not create the configuration directory. Directory creation happens on-demand when saving files via `hts_settings_makedirs()`.
 
 **Example** (`src/main.c`):
 ```c
@@ -819,114 +737,51 @@ HTSMSG_FOREACH(f, channels) {
 htsmsg_destroy(channels);
 ```
 
-#### 19.2.4 Backup Mechanism
+#### 19.2.4 Configuration Protection
 
-Tvheadend provides a backup mechanism to protect against configuration loss during upgrades or migrations.
+Tvheadend protects configuration data through atomic write operations rather than explicit backup mechanisms.
 
-**Backup Creation:**
+**Atomic Write Protection:**
 
-Backups are created in the `backup/` subdirectory with timestamps:
+When saving configuration files, `hts_settings_save()` uses a two-step process:
 
-```
-~/.hts/tvheadend/backup/
-├── config.1699200000      # Backup from timestamp 1699200000
-├── config.1699300000      # Backup from timestamp 1699300000
-└── config.1699400000      # Backup from timestamp 1699400000
-```
+1. **Write to temporary file**: Data is written to `<path>.tmp`
+2. **Atomic rename**: The temporary file is renamed to the final path using `rename()`
 
-**Backup Triggers:**
-1. **Manual backup**: Via web UI or command-line option
-2. **Pre-migration backup**: Before configuration migration
-3. **Pre-upgrade backup**: Before version upgrade
-4. **Scheduled backup**: Optional periodic backups
+The `rename()` system call is atomic on POSIX systems, meaning:
+- The operation either completes fully or not at all
+- No partial or corrupted files are left behind
+- If the system crashes during write, either the old file remains or the new file is complete
 
-**Backup Implementation:**
+**Manual Backup:**
 
-```c
-int config_backup(const char *reason)
-{
-  char src[PATH_MAX], dst[PATH_MAX];
-  time_t now = time(NULL);
-  
-  // Build source and destination paths
-  snprintf(src, sizeof(src), "%s", hts_settings_get_root());
-  snprintf(dst, sizeof(dst), "%s/backup/config.%ld", 
-           hts_settings_get_root(), (long)now);
-  
-  // Create backup directory
-  if (makedirs(LS_SETTINGS, dst, 0700, 1, -1, -1) < 0) {
-    tvherror(LS_SETTINGS, "Failed to create backup directory");
-    return -1;
-  }
-  
-  // Copy configuration files recursively
-  if (copy_directory_recursive(src, dst, 
-                                /* exclude */ "backup,imagecache,epgdb") < 0) {
-    tvherror(LS_SETTINGS, "Failed to backup configuration");
-    return -1;
-  }
-  
-  tvhinfo(LS_SETTINGS, "Configuration backed up to %s (%s)", 
-          dst, reason);
-  
-  return 0;
-}
-```
-
-**Backup Exclusions:**
-- `backup/` - Don't backup backups
-- `imagecache/` - Cached images (can be regenerated)
-- `epgdb.v3` - EPG database (large, can be regenerated)
-- `*.tmp` - Temporary files
-
-**Backup Restoration:**
-
-Backups can be restored manually by copying files back:
+Users can manually backup their configuration directory:
 
 ```bash
 # Stop Tvheadend
 systemctl stop tvheadend
 
-# Restore from backup
-cp -r ~/.hts/tvheadend/backup/config.1699200000/* ~/.hts/tvheadend/
+# Create backup
+cp -r ~/.hts/tvheadend ~/.hts/tvheadend.backup.$(date +%s)
 
 # Start Tvheadend
 systemctl start tvheadend
 ```
 
-**Automatic Cleanup:**
+**Restoration:**
 
-Old backups can be automatically cleaned up to save disk space:
+To restore from a manual backup:
 
-```c
-void config_backup_cleanup(int keep_count)
-{
-  char path[PATH_MAX];
-  struct dirent **namelist;
-  int n, i;
-  
-  snprintf(path, sizeof(path), "%s/backup", hts_settings_get_root());
-  
-  // Scan backup directory
-  n = scandir(path, &namelist, NULL, alphasort);
-  if (n < 0) return;
-  
-  // Keep only the most recent 'keep_count' backups
-  for (i = 0; i < n - keep_count; i++) {
-    if (strncmp(namelist[i]->d_name, "config.", 7) == 0) {
-      char backup_path[PATH_MAX];
-      snprintf(backup_path, sizeof(backup_path), "%s/%s", 
-               path, namelist[i]->d_name);
-      rmtree(backup_path);
-      tvhdebug(LS_SETTINGS, "Removed old backup: %s", backup_path);
-    }
-  }
-  
-  // Free namelist
-  for (i = 0; i < n; i++)
-    free(namelist[i]);
-  free(namelist);
-}
+```bash
+# Stop Tvheadend
+systemctl stop tvheadend
+
+# Restore configuration
+rm -rf ~/.hts/tvheadend
+cp -r ~/.hts/tvheadend.backup.TIMESTAMP ~/.hts/tvheadend
+
+# Start Tvheadend
+systemctl start tvheadend
 ```
 
 #### 19.2.5 Settings File Operations
@@ -1025,12 +880,16 @@ char *hts_settings_get_xdg_dir_with_fallback(const char *name,
                                               const char *fallback);
 ```
 
-**Supported Directories:**
+**XDG Directory Names:**
+
+The XDG functions accept standard XDG directory names such as:
 - `VIDEOS` - User's videos directory
 - `MUSIC` - User's music directory
 - `PICTURES` - User's pictures directory
 - `DOCUMENTS` - User's documents directory
 - `DOWNLOAD` - User's download directory
+
+These are standard XDG Base Directory Specification names. The actual directories are defined in `~/.config/user-dirs.dirs`.
 
 **Example Usage:**
 ```c

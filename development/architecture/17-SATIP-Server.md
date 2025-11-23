@@ -234,71 +234,40 @@ sequenceDiagram
 ```
 
 **Boot Phase** (`satip_server_boot()`):
+
+The `satip_server_boot()` function performs early initialization during Tvheadend startup:
+
 ```c
 void satip_server_boot(void)
 {
-  // Register configuration class
   idclass_register(&satip_server_class);
-  
-  // Generate boot ID (used in UPnP)
   satip_server_bootid = time(NULL);
-  
-  // Set default device ID
   satip_server_conf.satip_deviceid = 1;
-  
-  // Set default RTP/TCP payload size (7896 bytes = 42 TS packets)
   satip_server_conf.satip_rtptcpsize = 7896/188;
 }
 ```
 
+This registers the configuration class, generates a boot ID (used in UPnP), sets the default device ID to 1, and sets the default RTP/TCP payload size to 42 TS packets (7896 bytes / 188 bytes per packet = 42).
+
 **Initialization Phase** (`satip_server_init()`):
+
+The `satip_server_init()` function initializes the SAT>IP server with the specified bind address and RTSP port. The function signature is:
+
 ```c
-void satip_server_init(const char *bindaddr, int rtsp_port)
-{
-  // Initialize reinit mutex
-  tvh_mutex_init(&satip_server_reinit, NULL);
-  
-  // Store bind address
-  satip_server_bindaddr = bindaddr ? strdup(bindaddr) : NULL;
-  
-  // Determine RTSP port
-  satip_server_rtsp_port_locked = rtsp_port > 0;
-  satip_server_rtsp_port = rtsp_port;
-  satips_rtsp_port(rtsp_port);  // Validate port (requires root for <1024)
-  
-  // Initialize RTSP server and RTP subsystem
-  satip_server_init_common("", 0);
-}
+void satip_server_init(const char *bindaddr, int rtsp_port);
 ```
 
+The function handles server initialization including mutex setup, bind address configuration, RTSP port determination, and initialization of the RTSP server and RTP subsystem.
+
 **Registration Phase** (`satip_server_register()`):
+
+The `satip_server_register()` function completes server registration and starts services. The function signature is:
+
 ```c
-void satip_server_register(void)
-{
-  // Generate UUID if not present
-  if (strempty(satip_server_conf.satip_uuid)) {
-    uuid_set(&u, NULL);
-    // Format as UPnP UUID string
-    satip_server_conf.satip_uuid = format_uuid(&u);
-  }
-  
-  // Create UPnP discovery service (unless disabled)
-  if (!satip_server_conf.satip_noupnp) {
-    satips_upnp_discovery = upnp_service_create(upnp_service);
-    satips_upnp_discovery->us_received = satips_upnp_discovery_received;
-    satips_upnp_discovery->us_destroy  = satips_upnp_discovery_destroy;
-  }
-  
-  // Register RTSP server
-  satip_server_rtsp_register();
-  
-  // Start RTCP thread
-  satip_rtp_init(0);
-  
-  // Send initial UPnP announcement
-  satips_upnp_send_announce();
-}
+void satip_server_register(void);
 ```
+
+The function performs server registration including UUID generation (if not present), UPnP discovery service creation (unless disabled via `satip_noupnp`), RTSP server registration, RTCP thread initialization, and initial UPnP announcements.
 
 #### 17.1.4 Device Description XML
 
@@ -381,22 +350,14 @@ int satip_rtsp_delsys(int fe, int *findex, const char **ftype)
 - Tuner configuration changes reflected in next UPnP announcement
 
 **Shutdown:**
+
+The `satip_server_done()` function performs graceful server shutdown. The function signature is:
+
 ```c
-void satip_server_done(void)
-{
-  // Stop RTSP server
-  satip_server_rtsp_done();
-  
-  // Send UPnP byebye messages
-  if (satip_server_rtsp_port > 0)
-    satips_upnp_send_byebye();
-  
-  // Cleanup resources
-  free(http_server_ip);
-  free(satip_server_conf.satip_uuid);
-  free(satip_server_bindaddr);
-}
+void satip_server_done(void);
 ```
+
+The function stops the RTSP server, sends UPnP byebye notifications (if RTSP port is active), and cleans up allocated resources.
 
 **Graceful Shutdown Sequence:**
 1. Stop accepting new RTSP connections
@@ -1336,7 +1297,7 @@ rtsp_new_session(const char *ipstr, int delsys, uint32_t nsession, int session)
   rs->peer_ipstr = strdup(ipstr);
   rs->nsession = nsession ?: session_number;
   snprintf(rs->session, sizeof(rs->session), "%08X", session_number);
-  session_number += 9876;  // Increment for uniqueness
+  // Session number is incremented for uniqueness
   
   // Initialize PID list
   mpegts_pid_init(&rs->pids);
@@ -1670,11 +1631,11 @@ The server sends three NOTIFY messages at startup:
 2. **uuid:...**: UUID-specific announcement
 3. **urn:ses-com:device:SatIPServer:1**: SAT>IP device type announcement
 
-These are sent at intervals: 0s, 11s, 22s after startup.
+These are sent at intervals: 0ms, 11ms, 22ms after startup.
 
 **Periodic Announcements:**
 
-After initial announcements, the server sends periodic NOTIFY messages every ~1800 seconds (30 minutes) to refresh client caches.
+The server's UPnP announcements use a cache-control max-age of 1800 seconds (30 minutes), indicating how long clients should cache the announcement. Clients are expected to refresh their cache by re-discovering the server or the server may send periodic announcements to maintain presence.
 
 #### 17.5.2 Device Description XML
 
@@ -1850,7 +1811,7 @@ Three byebye messages are sent (same as announcements):
 2. **uuid:...**
 3. **urn:ses-com:device:SatIPServer:1**
 
-These are sent at intervals: 0s, 11s, 22s during shutdown.
+These are sent at intervals: 0ms, 11ms, 22ms during shutdown.
 
 **Client Behavior:**
 
@@ -1902,4 +1863,4 @@ Common discovery issues:
 4. **Device ID collision**: Check logs for collision warnings
 5. **UPnP disabled**: Enable UPnP or configure clients manually
 
-[← Previous: HTSP Server](16-HTSP-Server.md) | [Table of Contents](00-TOC.md) | [Next: Access Control System →](18-Access-Control-System.md)
+[← Previous](16-HTSP-Server.md) | [Table of Contents](00-TOC.md) | [Next →](18-Access-Control-System.md)

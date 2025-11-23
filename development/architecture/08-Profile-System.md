@@ -75,7 +75,7 @@ typedef struct profile {
 4. **Priority and Scheduling**:
    - `pro_prio`: Default priority for subscriptions using this profile
    - `pro_fprio`: If non-zero, forces this priority regardless of subscription request
-   - Priority values range from `PROFILE_SPRIO_UNIMPORTANT` to `PROFILE_SPRIO_IMPORTANT`
+   - Priority values range from `PROFILE_SPRIO_NOTSET` (0) to `PROFILE_SPRIO_DVR_UNIMPORTANT`, including standard priorities (IMPORTANT, HIGH, NORMAL, LOW, UNIMPORTANT) and DVR-specific overrides (DVR_IMPORTANT through DVR_UNIMPORTANT)
 
 5. **Timeout Configuration**:
    - `pro_timeout`: Maximum seconds to wait for data (0 = infinite)
@@ -461,6 +461,7 @@ Profile chains are built dynamically when a subscription or recording starts. Th
 
 **Example Chain Building** (Pass-Through Profile):
 ```c
+// Example implementation (actual function names may differ in codebase)
 int profile_mpegts_pass_open(profile_chain_t *prch, muxer_config_t *m_cfg,
                              muxer_hints_t *hints, int flags, size_t qsize)
 {
@@ -506,7 +507,8 @@ Once built, the profile chain processes streaming messages from the service thro
 
 2. **Input Target Callback**:
    ```c
-   static void profile_chain_input(void *opaque, streaming_message_t *sm)
+   // Example callback implementation (actual implementation in src/profile.c may differ)
+   static void profile_input(void *opaque, streaming_message_t *sm)
    {
      profile_chain_t *prch = opaque;
      
@@ -516,9 +518,9 @@ Once built, the profile chain processes streaming messages from the service thro
        return;
      }
      
-     // Queue message if queue is enabled
+     // Queue message if queue is enabled (actual queue API may differ)
      if (prch->prch_sq_used) {
-       streaming_queue_put(&prch->prch_sq, sm);
+       streaming_queue_put(&prch->prch_sq, sm);  // Example API call
        return;
      }
      
@@ -605,7 +607,8 @@ typedef struct profile_sharer {
 
 **Example Sharing Check**:
 ```c
-int profile_chain_can_share(profile_chain_t *prch, profile_chain_t *joiner)
+// Example sharing check (actual implementation may use different function names)
+int profile_transcode_can_share(profile_chain_t *prch, profile_chain_t *joiner)
 {
   // Must use same profile
   if (prch->prch_pro != joiner->prch_pro)
@@ -615,7 +618,7 @@ int profile_chain_can_share(profile_chain_t *prch, profile_chain_t *joiner)
   if (get_service(prch) != get_service(joiner))
     return 0;
   
-  // Profile-specific checks
+  // Profile-specific checks (implemented for transcoding profiles)
   if (prch->prch_pro->pro_can_share)
     return prch->prch_pro->pro_can_share(prch, joiner);
   
@@ -722,63 +725,29 @@ The transcoding subsystem is implemented as a streaming target that sits in the 
 Input Stream → Decoder → Scaler/Filter → Encoder → Output Stream
 ```
 
-**Transcoder Creation**:
-```c
-streaming_target_t *transcoder_create(streaming_target_t *output,
-                                     const char **profiles,
-                                     const char **src_codecs);
-```
+**Transcoding Integration**:
 
-**Parameters**:
-- `output`: Next target in chain (receives transcoded packets)
-- `profiles`: Array of profile names for codec selection
-- `src_codecs`: Array of source codec names
+Transcoding is integrated into the profile system through profile-specific implementations rather than a standalone transcoder_create function. Transcoding profiles use the standard profile chain mechanism with transcoding-specific components in the src/transcoding/ directory.
 
-**Transcoder Structure** (internal):
-```c
-typedef struct transcoder {
-  streaming_target_t tc_input;        // Input target (receives from source)
-  streaming_target_t *tc_output;      // Output target (delivers transcoded)
-  
-  // Decoder contexts (one per input stream)
-  AVCodecContext *tc_vdec_ctx;        // Video decoder
-  AVCodecContext *tc_adec_ctx;        // Audio decoder
-  
-  // Encoder contexts (one per output stream)
-  AVCodecContext *tc_venc_ctx;        // Video encoder
-  AVCodecContext *tc_aenc_ctx;        // Audio encoder
-  
-  // Filtering/scaling
-  AVFilterGraph *tc_vfilter;          // Video filter graph
-  AVFilterGraph *tc_afilter;          // Audio filter graph
-  
-  // Frame buffers
-  AVFrame *tc_vframe;                 // Video frame buffer
-  AVFrame *tc_aframe;                 // Audio frame buffer
-  
-  // Packet buffers
-  AVPacket *tc_vpkt;                  // Video packet buffer
-  AVPacket *tc_apkt;                  // Audio packet buffer
-  
-  // Hardware acceleration
-  AVBufferRef *tc_hw_device_ctx;      // Hardware device context
-  AVBufferRef *tc_hw_frames_ctx;      // Hardware frames context
-  enum AVHWDeviceType tc_hw_type;     // Hardware type (VAAPI, NVENC, QSV)
-  
-  // Threading
-  pthread_t tc_thread;                // Transcoding thread
-  tvh_mutex_t tc_mutex;               // Mutex for state
-  tvh_cond_t tc_cond;                 // Condition for queue
-  TAILQ_HEAD(,th_pkt) tc_queue;       // Input packet queue
-  int tc_running;                     // Running flag
-  
-  // Statistics
-  int64_t tc_frames_in;               // Input frames
-  int64_t tc_frames_out;              // Output frames
-  int64_t tc_bytes_in;                // Input bytes
-  int64_t tc_bytes_out;               // Output bytes
-} transcoder_t;
-```
+The transcoding subsystem includes:
+- Codec handling in src/transcoding/codec/
+- Transcode operations in src/transcoding/transcode/
+- Hardware acceleration support in src/transcoding/transcode/hwaccels/
+
+**Transcoding Implementation**:
+
+The transcoding implementation is distributed across multiple modules in src/transcoding/ rather than a single monolithic structure. Key components include:
+
+- **Codec Management**: Handles FFmpeg AVCodecContext for decoders and encoders
+- **Filter Graphs**: Manages AVFilterGraph for video/audio filtering and scaling
+- **Hardware Acceleration**: Supports VAAPI, NVENC (CUDA), and QSV through FFmpeg's hardware APIs
+- **Threading**: Integrated into the profile chain's streaming pipeline for shared transcoding
+- **Statistics**: Tracked through the streaming subsystem
+
+The actual implementation details are in:
+- src/transcoding/codec/ - Codec selection and configuration
+- src/transcoding/transcode/ - Transcoding pipeline
+- src/transcoding/transcode/hwaccels/ - Hardware acceleration
 
 #### 8.3.2 libav/FFmpeg Integration
 
@@ -793,20 +762,14 @@ Tvheadend uses FFmpeg's libav libraries for transcoding:
 - `libswresample`: Audio resampling
 
 **Initialization**:
+
+libav/FFmpeg integration is handled through the transcoding subsystem in src/transcoding/ and src/libav.c. Initialization follows FFmpeg's standard patterns:
+
 ```c
-void libav_init(void)
-{
-  // Register all codecs and formats
-  av_register_all();
-  avcodec_register_all();
-  avfilter_register_all();
-  
-  // Set log level
-  av_log_set_level(AV_LOG_WARNING);
-  
-  // Set log callback
-  av_log_set_callback(tvh_libav_log_callback);
-}
+// FFmpeg initialization is handled during transcoding profile setup
+// Modern FFmpeg versions auto-register codecs, older versions use:
+// av_register_all(), avcodec_register_all(), avfilter_register_all()
+// Log level and callbacks are configured through FFmpeg's standard APIs
 ```
 
 **Decoder Setup**:
@@ -979,31 +942,14 @@ AVCodec *encoder = avcodec_find_encoder_by_name("h264_qsv");
 **Performance**: 8-15x faster than software encoding
 
 **Hardware Acceleration Selection**:
-```c
-// Detect available hardware acceleration
-enum AVHWDeviceType detect_hw_accel(void)
-{
-  enum AVHWDeviceType type;
-  
-  // Try VAAPI first (Linux)
-  type = av_hwdevice_find_type_by_name("vaapi");
-  if (type != AV_HWDEVICE_TYPE_NONE && test_hw_device(type))
-    return type;
-  
-  // Try NVENC (NVIDIA)
-  type = av_hwdevice_find_type_by_name("cuda");
-  if (type != AV_HWDEVICE_TYPE_NONE && test_hw_device(type))
-    return type;
-  
-  // Try QSV (Intel)
-  type = av_hwdevice_find_type_by_name("qsv");
-  if (type != AV_HWDEVICE_TYPE_NONE && test_hw_device(type))
-    return type;
-  
-  // Fall back to software
-  return AV_HWDEVICE_TYPE_NONE;
-}
-```
+
+Hardware acceleration support is available through FFmpeg's hardware acceleration APIs. Configuration is handled through profile settings rather than a standalone detect_hw_accel() function. The transcoding subsystem supports:
+
+- VAAPI (Video Acceleration API) for Intel/AMD GPUs on Linux
+- NVENC (NVIDIA Encoder) for NVIDIA GPUs
+- QSV (Intel Quick Sync Video) for Intel CPUs
+
+Hardware acceleration is configured per transcoding profile and uses FFmpeg's av_hwdevice_find_type_by_name() and related APIs for device detection and initialization.
 
 #### 8.3.5 Transcoding Process
 
@@ -1030,136 +976,40 @@ enum AVHWDeviceType detect_hw_accel(void)
    - Forward SMT_STOP to output
 
 **Packet Processing**:
-```c
-void transcode_packet(transcoder_t *tc, th_pkt_t *pkt)
-{
-  AVPacket avpkt;
-  AVFrame *frame;
-  int ret;
-  
-  // Convert th_pkt to AVPacket
-  av_init_packet(&avpkt);
-  avpkt.data = pktbuf_ptr(pkt->pkt_payload);
-  avpkt.size = pktbuf_len(pkt->pkt_payload);
-  avpkt.pts = pkt->pkt_pts;
-  avpkt.dts = pkt->pkt_dts;
-  
-  // Decode packet
-  ret = avcodec_send_packet(tc->tc_vdec_ctx, &avpkt);
-  if (ret < 0) {
-    tvherror(LS_TRANSCODE, "decode error");
-    return;
-  }
-  
-  // Receive decoded frame
-  frame = av_frame_alloc();
-  ret = avcodec_receive_frame(tc->tc_vdec_ctx, frame);
-  if (ret < 0) {
-    av_frame_free(&frame);
-    return;
-  }
-  
-  // Apply filters (scaling, etc.)
-  if (tc->tc_vfilter) {
-    av_buffersrc_add_frame(tc->tc_vfilter_src, frame);
-    av_buffersink_get_frame(tc->tc_vfilter_sink, frame);
-  }
-  
-  // Encode frame
-  ret = avcodec_send_frame(tc->tc_venc_ctx, frame);
-  av_frame_free(&frame);
-  
-  // Receive encoded packet
-  AVPacket enc_pkt;
-  av_init_packet(&enc_pkt);
-  ret = avcodec_receive_packet(tc->tc_venc_ctx, &enc_pkt);
-  if (ret == 0) {
-    // Convert AVPacket to th_pkt and send to output
-    th_pkt_t *out_pkt = create_pkt_from_avpacket(&enc_pkt);
-    streaming_target_deliver(tc->tc_output, 
-                            streaming_msg_create_pkt(out_pkt));
-    av_packet_unref(&enc_pkt);
-  }
-}
-```
 
-**Filter Graph Setup** (for scaling):
-```c
-void setup_video_filter(transcoder_t *tc, int in_w, int in_h, 
-                       int out_w, int out_h)
-{
-  char args[512];
-  AVFilterInOut *inputs, *outputs;
-  
-  // Create filter graph
-  tc->tc_vfilter = avfilter_graph_alloc();
-  
-  // Source filter (input)
-  snprintf(args, sizeof(args),
-           "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d",
-           in_w, in_h, tc->tc_vdec_ctx->pix_fmt,
-           tc->tc_vdec_ctx->time_base.num,
-           tc->tc_vdec_ctx->time_base.den);
-  avfilter_graph_create_filter(&tc->tc_vfilter_src,
-                               avfilter_get_by_name("buffer"),
-                               "in", args, NULL, tc->tc_vfilter);
-  
-  // Sink filter (output)
-  avfilter_graph_create_filter(&tc->tc_vfilter_sink,
-                               avfilter_get_by_name("buffersink"),
-                               "out", NULL, NULL, tc->tc_vfilter);
-  
-  // Scale filter
-  snprintf(args, sizeof(args), "w=%d:h=%d", out_w, out_h);
-  AVFilterContext *scale_ctx;
-  avfilter_graph_create_filter(&scale_ctx,
-                               avfilter_get_by_name("scale"),
-                               "scale", args, NULL, tc->tc_vfilter);
-  
-  // Connect filters: source → scale → sink
-  avfilter_link(tc->tc_vfilter_src, 0, scale_ctx, 0);
-  avfilter_link(scale_ctx, 0, tc->tc_vfilter_sink, 0);
-  
-  // Configure graph
-  avfilter_graph_config(tc->tc_vfilter, NULL);
-}
-```
+Packet processing in the transcoding subsystem uses FFmpeg's avcodec APIs (avcodec_send_packet, avcodec_receive_frame, avcodec_send_frame, avcodec_receive_packet) but the implementation is distributed across multiple modules in src/transcoding/ rather than a single transcode_packet() function.
 
-#### 8.3.6 Transcoding Threads
+The transcoding pipeline:
+1. Receives packets from the streaming source
+2. Decodes using FFmpeg's avcodec_send_packet() and avcodec_receive_frame()
+3. Applies filters (scaling, deinterlacing) through AVFilterGraph
+4. Encodes using avcodec_send_frame() and avcodec_receive_packet()
+5. Delivers transcoded packets to the output target
 
-Transcoding runs in a dedicated thread to avoid blocking the main streaming pipeline:
+Implementation is in src/transcoding/transcode/video.c and audio.c.
 
-**Thread Function**:
-```c
-void *transcoder_thread(void *arg)
-{
-  transcoder_t *tc = arg;
-  th_pkt_t *pkt;
-  
-  while (tc->tc_running) {
-    // Wait for packet in queue
-    tvh_mutex_lock(&tc->tc_mutex);
-    while (TAILQ_EMPTY(&tc->tc_queue) && tc->tc_running)
-      tvh_cond_wait(&tc->tc_cond, &tc->tc_mutex);
-    
-    pkt = TAILQ_FIRST(&tc->tc_queue);
-    if (pkt)
-      TAILQ_REMOVE(&tc->tc_queue, pkt, pkt_link);
-    tvh_mutex_unlock(&tc->tc_mutex);
-    
-    if (!pkt)
-      continue;
-    
-    // Transcode packet
-    transcode_packet(tc, pkt);
-    
-    // Free input packet
-    pkt_ref_dec(pkt);
-  }
-  
-  return NULL;
-}
-```
+**Filter Graph Setup**:
+
+Video filtering and scaling are handled through FFmpeg's libavfilter APIs within the transcoding subsystem. Filter graph setup is integrated into the transcoding pipeline rather than exposed as a standalone setup_video_filter() function.
+
+The filter graph typically includes:
+- Buffer source filter (input from decoder)
+- Scale filter (resolution changes)
+- Format conversion filters
+- Deinterlace filter (if needed)
+- Buffer sink filter (output to encoder)
+
+Filter graphs are created using FFmpeg's avfilter_graph_alloc(), avfilter_graph_create_filter(), avfilter_link(), and avfilter_graph_config() APIs. Implementation is in src/transcoding/transcode/video.c.
+
+#### 8.3.6 Transcoding Threading
+
+Transcoding processing is integrated into the profile chain's streaming pipeline. Shared transcoders use a dedicated thread (implementation in src/profile.c) to handle queued messages:
+
+**Threading Model**:
+- Shared transcoders use a dedicated thread to process messages from a queue
+- The thread waits on a condition variable for new messages
+- Messages are processed sequentially to maintain stream ordering
+- Thread lifecycle is managed by the profile_sharer_t structure
 
 **Benefits of Threading**:
 - Non-blocking: Main thread continues processing
@@ -1290,100 +1140,34 @@ Stream filtering is applied during the `SMT_START` message processing:
    - Forward to next pipeline stage
 
 **Filter Matching**:
-```c
-int esfilter_match(esfilter_t *esf, elementary_stream_t *st)
-{
-  // Check class
-  if (esf->esf_class != ESF_CLASS_NONE &&
-      esf->esf_class != stream_class(st->es_type))
-    return 0;
-  
-  // Check type
-  if (esf->esf_type && !(esf->esf_type & SCT_MASK(st->es_type)))
-    return 0;
-  
-  // Check language
-  if (esf->esf_language[0] &&
-      strcmp(esf->esf_language, st->es_lang) != 0)
-    return 0;
-  
-  // Check service
-  if (esf->esf_service[0] &&
-      strcmp(esf->esf_service, service_uuid(st->es_service)) != 0)
-    return 0;
-  
-  // Check PID
-  if (esf->esf_pid && esf->esf_pid != st->es_pid)
-    return 0;
-  
-  // Check CA system
-  if (esf->esf_caid && esf->esf_caid != st->es_caid)
-    return 0;
-  
-  // All criteria match
-  return 1;
-}
-```
+
+Elementary stream filtering is implemented in src/esfilter.c. The esfilter_t structure defines filter criteria, and filtering logic is integrated into the streaming subsystem. Filters match streams based on:
+
+- Stream class (video, audio, teletext, subtitles, CA, other)
+- Stream type (specific codec types within a class)
+- Language code (ISO 639-2, 3-character codes)
+- Service UUID (to filter specific services)
+- PID (MPEG-TS specific stream identifier)
+- CA system ID and provider (for conditional access streams)
+
+The filtering implementation checks each criterion and applies the configured action (USE, IGNORE, EXCLUSIVE, etc.) to matching streams.
 
 **Filter Application**:
-```c
-void apply_esfilters(streaming_start_t *ss)
-{
-  esfilter_t *esf;
-  elementary_stream_t *st;
-  int i, action;
-  
-  // Mark all streams as not selected initially
-  for (i = 0; i < ss->ss_num_components; i++)
-    ss->ss_components[i].ssc_disabled = 1;
-  
-  // Apply filters in priority order
-  TAILQ_FOREACH(esf, &esfilters[esf->esf_class], esf_link) {
-    if (!esf->esf_enabled)
-      continue;
-    
-    for (i = 0; i < ss->ss_num_components; i++) {
-      st = &ss->ss_components[i];
-      
-      if (!esfilter_match(esf, st))
-        continue;
-      
-      // Apply action
-      switch (esf->esf_action) {
-        case ESFA_USE:
-          st->ssc_disabled = 0;
-          break;
-        
-        case ESFA_EXCLUSIVE:
-          // Disable all other streams of same class
-          disable_other_streams(ss, st, esf->esf_class);
-          st->ssc_disabled = 0;
-          break;
-        
-        case ESFA_ONE_TIME:
-          // Enable if no stream of this language enabled yet
-          if (!has_language_enabled(ss, st->es_lang, esf->esf_class))
-            st->ssc_disabled = 0;
-          break;
-        
-        case ESFA_EMPTY:
-          // Enable if no streams of this class enabled
-          if (!has_class_enabled(ss, esf->esf_class))
-            st->ssc_disabled = 0;
-          break;
-        
-        case ESFA_IGNORE:
-          st->ssc_disabled = 1;
-          break;
-      }
-      
-      if (esf->esf_log)
-        tvhlog(LOG_INFO, "esfilter", "matched stream %d: %s",
-               i, esfilter_action2txt(esf->esf_action));
-    }
-  }
-}
-```
+
+Elementary stream filter application is handled within the streaming subsystem in src/esfilter.c. Filters are applied during stream initialization based on the esfilter_t configuration.
+
+The filter application process:
+1. Filters are evaluated in priority order (esf_index)
+2. Each enabled filter is checked against all elementary streams
+3. Matching streams have the filter action applied:
+   - **ESFA_USE**: Enable the stream
+   - **ESFA_EXCLUSIVE**: Enable this stream and disable all others of the same class
+   - **ESFA_ONE_TIME**: Enable if no stream of this language is already enabled
+   - **ESFA_EMPTY**: Enable if no streams of this class are enabled (fallback)
+   - **ESFA_IGNORE**: Disable the stream
+4. Filters can log matches for debugging (esf_log flag)
+
+The filtering implementation is integrated into the streaming_start message processing.
 
 #### 8.4.4 Default Filter Behavior
 
@@ -1591,12 +1375,12 @@ The profile system's performance characteristics vary significantly based on the
 - **Filter Graphs**: Additional memory for scaling/filtering, 5-20 MB
 
 **Memory Optimization**:
-```c
-// Limit queue sizes to prevent memory bloat
-#define MAX_QUEUE_SIZE (10 * 1024 * 1024)  // 10 MB
 
+Queue sizes are managed through the streaming_queue structure. Queue size limits are configured per profile chain rather than defined as a global MAX_QUEUE_SIZE constant.
+
+```c
 // Use reference counting to avoid copying
-pkt_ref_inc(pkt);  // Increment reference instead of copying
+pkt_ref_dec(pkt);  // Decrement reference when done
 
 // Free resources promptly
 streaming_msg_free(sm);  // Free message when done

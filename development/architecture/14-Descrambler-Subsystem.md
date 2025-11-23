@@ -249,7 +249,7 @@ typedef struct th_descrambler_runtime {
   int64_t  dr_force_skip;                      // Force skip until time
   
   // Key management
-  th_descrambler_key_t dr_keys[DESCRAMBLER_MAX_KEYS];  // Key array
+  th_descrambler_key_t dr_keys[];  // Variable-length key array
   th_descrambler_key_t *dr_key_last;           // Last used key
   
   // Packet queue
@@ -1100,9 +1100,9 @@ EMM Packet:
 
 #### 14.3.5 EMM Handling
 
-**Location**: `src/descrambler/descrambler.c`, `src/descrambler/emm_reass.c`
+**Location**: `src/descrambler/descrambler.c`
 
-EMM handling is more complex than ECM due to addressing and filtering requirements.
+EMM handling is more complex than ECM due to addressing and filtering requirements. EMM reassembly and filtering logic is implemented in descrambler.c.
 
 **EMM Processing Flow**:
 
@@ -1405,9 +1405,9 @@ Different CA systems use different ECM parity conventions:
 
 #### 14.4.3 CSA Decryption
 
-**Location**: `src/descrambler/tvhcsa.c`, `src/descrambler/algo/`
+**Location**: `src/descrambler/tvhcsa.c`
 
-CSA (Common Scrambling Algorithm) is the standard DVB encryption algorithm.
+CSA (Common Scrambling Algorithm) is the standard DVB encryption algorithm. The main CSA implementation is in tvhcsa.c, which may use external libraries like libdvbcsa for optimized implementations.
 
 **CSA Algorithm**:
 - **Block cipher**: 64-bit block size
@@ -1471,17 +1471,13 @@ Factors affecting performance:
 
 ```c
 // Set even key
-void tvhcsa_set_key_even(tvhcsa_t *csa, const uint8_t *even) {
-  memcpy(csa->csa_key_data[0], even, 8);
-  dvbcsa_bs_key_set(even, csa->csa_key_even);
-}
+void tvhcsa_set_key_even(tvhcsa_t *csa, const uint8_t *even);
 
 // Set odd key
-void tvhcsa_set_key_odd(tvhcsa_t *csa, const uint8_t *odd) {
-  memcpy(csa->csa_key_data[1], odd, 8);
-  dvbcsa_bs_key_set(odd, csa->csa_key_odd);
-}
+void tvhcsa_set_key_odd(tvhcsa_t *csa, const uint8_t *odd);
 ```
+
+These functions configure the CSA decryption engine with even and odd control words. The implementation uses the configured CSA library (e.g., libdvbcsa) to set up the decryption keys.
 
 #### 14.4.4 AES Decryption
 
@@ -1688,15 +1684,18 @@ When keys are not available:
 **Queue Management**:
 
 ```c
-// Maximum queue size (bytes)
-#define MAX_QUEUE_SIZE (1024 * 1024)  // 1 MB
+// Queue size is configurable via config.descrambler_buffer
+// Minimum buffer size is 300 packets
+int dbuflen = MAX(300, config.descrambler_buffer);
 
-// Add packet to queue
-if (dr->dr_queue_total < MAX_QUEUE_SIZE) {
-  descrambler_data_append(dr, tsb, len);
-} else {
-  // Queue full, skip packet
-  tvhwarn(LS_DESCRAMBLER, "Queue full, skipping packet");
+// Check if queue exceeds buffer limit
+if (dr->dr_queue_total >= dbuflen * 188) {
+  // Cut queue to 10% of buffer size
+  descrambler_data_cut(dr, MAX((dbuflen / 10) * 188, len));
+  // Log warning if not recently logged
+  if (dr->dr_last_err + sec2mono(10) < mclk()) {
+    tvhwarn(LS_DESCRAMBLER, "Queue full, cutting packets");
+  }
 }
 ```
 
@@ -1736,7 +1735,10 @@ struct service {
   LIST_HEAD(, th_descrambler) s_descramblers;  // List of descramblers
   
   // Runtime descrambler
-  th_descrambler_runtime_t *s_descrambler_runtime;  // Active descrambler
+  th_descrambler_runtime_t *s_descramble;  // Active descrambler runtime
+  
+  // Last active descrambler
+  void *s_descrambler;  // Last active descrambler pointer
   
   // CA information
   struct caid_list s_caids;                    // List of CAIDs from PMT
@@ -2020,7 +2022,7 @@ Descrambler state affects service streaming status.
 
 ```c
 #define TSS_NO_DESCRAMBLER   0x00020000  // No descrambler available
-#define TSS_CA_CHECK         0x00080000  // CA system check in progress
+#define TSS_CA_CHECK         0x00000020  // CA system check in progress
 ```
 
 **Status Updates**:

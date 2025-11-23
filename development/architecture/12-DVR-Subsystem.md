@@ -1233,8 +1233,7 @@ time_t dvr_entry_get_start_time(dvr_entry_t *de, int warm)
 
 **Warm-Up Time**:
 - Starts tuner early to ensure lock before recording
-- Typically 30-60 seconds
-- Configurable per DVR profile
+- Configurable per DVR profile (dvr_warm_time field)
 - Not included in recorded file
 
 #### 12.3.4 Recording Start
@@ -1310,14 +1309,13 @@ static void *dvr_thread(void *aux)
   }
   
   // 2. Create profile chain (muxer, transcoder, etc.)
-  de->de_chain = profile_chain_create(
-    de->de_config->dvr_profile,
-    de,
-    &dvr_profile_class
-  );
+  profile_chain_t *prch = malloc(sizeof(*prch));
+  profile_chain_init(prch, de->de_config->dvr_profile, de->de_channel, 1);
+  profile_chain_open(prch, &de->de_config->dvr_muxcnf, NULL, 0, 0);
+  de->de_chain = prch;
   
-  // 3. Connect subscription to profile chain
-  streaming_target_connect(&de->de_s->ths_input, &de->de_chain->prch_st);
+  // 3. Subscription already connected to profile chain
+  // (subscription was created from profile chain)
   
   // 4. Wait for recording to complete
   while (!de->de_thread_shutdown) {
@@ -2268,11 +2266,12 @@ static int dvr_entry_get_weight(dvr_entry_t *de)
 The profile chain processes streaming data before writing to file:
 
 ```c
-// Create profile chain
-profile_chain_t *chain = profile_chain_create(
+// Initialize profile chain
+profile_chain_t chain;
+profile_chain_init(&chain,
   de->de_config->dvr_profile,  // Streaming profile
   de,                          // DVR entry (opaque)
-  &dvr_profile_class           // Profile class
+  1                            // Queue flag
 );
 
 // Chain components (example)

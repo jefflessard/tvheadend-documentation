@@ -200,7 +200,6 @@ Services transition through three primary states during their lifecycle:
 - **Characteristics**:
   - One or more active subscriptions
   - Input resources allocated (tuner, network connection)
-  - Streaming threads active
   - Data flowing through streaming pad
   - Statistics being collected
   - Timers active for monitoring
@@ -384,10 +383,14 @@ The `s_streaming_status` field uses bit flags to track streaming progress and er
 **Error Detection**:
 ```c
 // Check if any error flags are set
+static inline int service_tss_is_error(int flags)
+{
+  return flags & TSS_ERRORS ? 1 : 0;
+}
+
 if (service_tss_is_error(s->s_streaming_status)) {
   // Handle error condition
-  int errcode = tss2errcode(s->s_streaming_status);
-  // errcode maps to standard error codes (EACCES, ETIMEDOUT, etc.)
+  // Error flags indicate specific problems (no descrambler, timeout, tuning failure)
 }
 ```
 
@@ -405,11 +408,11 @@ service_send_streaming_status(s);
 
 **Status Text Conversion**:
 ```c
-const char *status_text = service_tss2text(s->s_streaming_status);
-// Returns human-readable description like:
-// "Waiting for input hardware"
-// "No descrambler available"
-// "Timeout waiting for packets"
+// Status flags can be interpreted to provide user feedback
+// TSS_INPUT_HARDWARE: "Waiting for input hardware"
+// TSS_NO_DESCRAMBLER: "No descrambler available"
+// TSS_TIMEOUT: "Timeout waiting for packets"
+// TSS_TUNING: "Tuning failure"
 ```
 
 These flags enable:
@@ -467,7 +470,7 @@ stateDiagram-v2
 **Trigger**: First subscription requests the service
 
 **Process**:
-1. **Subscription Request**: Client or DVR requests service via `subscription_create_from_channel()` or `subscription_create_from_service()`
+1. **Subscription Request**: Client or DVR requests service via subscription creation functions
 2. **Service Instance Selection**: System finds suitable input source via `service_find_instance()`
 3. **Service Start**: `service_start()` called with instance, weight, and flags
 4. **Input Allocation**: Input source allocates resources (tuner, network connection)
@@ -722,7 +725,7 @@ int service_start(service_t *t, int instance, int weight, int flags,
    ```c
    // Arm receive timer for grace period
    t->s_start_time = getmonoclock();
-   mtimer_arm_rel(&t->s_receive_timer, service_receive_timeout, t,
+   mtimer_arm_rel(&t->s_receive_timer, /* timer callback */, t,
                   sec2mono(timeout ?: t->s_timeout));
    ```
 
@@ -822,13 +825,13 @@ void service_stop(service_t *t);
    ```c
    // Release descrambler resources
    if (t->s_descramble) {
-     descrambler_runtime_destroy(t->s_descramble);
+     // Descrambler cleanup handled internally
      t->s_descramble = NULL;
    }
    
    // Clear elementary streams (with s_stream_mutex held)
    tvh_mutex_lock(&t->s_stream_mutex);
-   elementary_set_clean(&t->s_components);
+   elementary_set_clean_streams(&t->s_components);
    tvh_mutex_unlock(&t->s_stream_mutex);
    ```
 
@@ -901,7 +904,7 @@ void service_restart(service_t *t);
    ```c
    // Clear existing streams (with s_stream_mutex held)
    tvh_mutex_lock(&t->s_stream_mutex);
-   elementary_set_clean(&t->s_components);
+   elementary_set_clean_streams(&t->s_components);
    tvh_mutex_unlock(&t->s_stream_mutex);
    ```
 
@@ -1219,15 +1222,12 @@ void service_unref(service_t *t);
 ```c
 void service_unref(service_t *t)
 {
-  if (atomic_dec(&t->s_refcount, 1) == 1) {
+  if (atomic_add(&t->s_refcount, -1) == 1) {
     // Refcount reached zero
-    if (t->s_status == SERVICE_ZOMBIE) {
-      // Service was waiting to be freed
-      if (t->s_unref)
-        t->s_unref(t);  // Virtual method for cleanup
-      else
-        free(t);  // Default: just free memory
-    }
+    if (t->s_unref)
+      t->s_unref(t);  // Virtual method for cleanup
+    free(t->s_nicename);
+    free(t);  // Free memory
   }
 }
 ```
@@ -1267,29 +1267,25 @@ The ZOMBIE state exists specifically to handle the case where a service is delet
    {
      tvh_mutex_lock(&global_lock);
      
-     if (t->s_refcount > 0) {
-       // References exist, can't free immediately
-       t->s_status = SERVICE_ZOMBIE;
-       
-       // Remove from active lists
-       LIST_REMOVE(t, s_all_link);
-       
-       // Stop streaming
-       if (t->s_status == SERVICE_RUNNING)
-         service_stop(t);
-       
-       // Delete configuration
-       if (delconf)
-         idnode_delete(&t->s_id);
-       
-       // Service remains in memory until refcount reaches 0
-     } else {
-       // No references, can free immediately
-       if (t->s_unref)
-         t->s_unref(t);
-       else
-         free(t);
-     }
+     // Perform cleanup operations
+     // - Call s_delete virtual method if present
+     // - Remove from service mapper
+     // - Unlink all subscriptions
+     // - Destroy bouquet associations
+     // - Unlink from channels
+     // - Unlink idnode
+     
+     // Always set to ZOMBIE state
+     t->s_status = SERVICE_ZOMBIE;
+     
+     // Clean up components
+     elementary_set_clean(&t->s_components, NULL, 0);
+     
+     // Remove from appropriate list
+     // (service_all, service_raw_all, or service_raw_remove)
+     
+     // Release reference - will free if refcount reaches 0
+     service_unref(t);
      
      tvh_mutex_unlock(&global_lock);
    }

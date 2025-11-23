@@ -589,10 +589,9 @@ typedef struct th_pkt {
   uint8_t pkt_commercial;        // Commercial flag
   
   uint8_t pkt_err;               // Error flag
-  uint8_t pkt_scrambled;         // Scrambled flag
   
   pktbuf_t *pkt_payload;         // Actual packet data
-  pktbuf_t *pkt_header;          // Optional header data
+  void *pkt_meta;                // Optional metadata
   
   // ... additional fields
 } th_pkt_t;

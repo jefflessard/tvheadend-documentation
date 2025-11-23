@@ -13,7 +13,7 @@ The architecture follows several key patterns:
 - **Event-driven processing**: Asynchronous event handling with timer-based and message-based coordination
 - **Configuration as code**: All configuration objects inherit from a common base (idnode) enabling automatic API generation and persistence
 
-The system is built around a central event loop with multiple specialized threads handling different aspects of operation (input processing, timer management, logging, HTTP serving, etc.). Synchronization is primarily managed through a global lock with additional per-subsystem locks for performance-critical paths.
+The system is built around a central event loop with multiple specialized threads handling different aspects of operation (input processing, timer management, logging, HTTP serving, etc.). Synchronization is managed through various locking mechanisms including per-subsystem locks for performance-critical paths.
 
 ### 2.2 Architecture Diagram
 
@@ -165,7 +165,7 @@ The input subsystem uses an object-oriented approach (implemented in C) with a c
 tvh_hardware (base class)
   ├─ linuxdvb_adapter (DVB hardware)
   ├─ iptv_network (IPTV sources)
-  ├─ satip_client (SAT>IP clients)
+  ├─ satip_device (SAT>IP devices)
   └─ tvhdhomerun_device (HDHomeRun)
 ```
 
@@ -295,7 +295,7 @@ The following table summarizes the major subsystems and their primary responsibi
 | **Subscription** | Client request handling, service selection, priority management | `th_subscription_t`, service instance selection |
 | **Descrambler** | CA system integration, ECM/EMM handling, decryption | `th_descrambler`, `caclient`, `tvhcsa` |
 | **DVR** | Recording scheduling, file management, autorec/timerec | `dvr_entry`, `dvr_autorec`, `dvr_timerec`, `dvr_config` |
-| **EPG** | Program guide data collection, storage, matching | `epg_broadcast`, `epg_episode`, EPG grabbers |
+| **EPG** | Program guide data collection, storage, matching | `epg_broadcast`, `epg_episode_num`, EPG grabbers |
 | **HTTP/API** | Web interface, REST API, authentication, access control | HTTP server, API handlers, `idnode` system |
 | **HTSP** | Native protocol server, client connections, streaming | HTSP server, message handlers |
 | **Configuration** | Persistence, settings management, migration | `idnode_t`, settings API, JSON storage |

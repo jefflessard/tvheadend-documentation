@@ -1270,10 +1270,9 @@ th_subscription_t *subscription_create_from_channel(
 **Key Differences from Generic Creation**:
 
 1. **Channel Association**:
-   ```c
-   s->ths_channel = prch->prch_id;  // prch->prch_id is channel_t*
-   LIST_INSERT_HEAD(&ch->ch_subscriptions, s, ths_channel_link);
-   ```
+   - The subscription's `ths_channel` field is set to the channel from the profile chain
+   - The subscription is added to the channel's subscription list via `ths_channel_link`
+   - This association is handled by the `subscription_create_from_channel_or_service()` helper function
 
 2. **Service Selection**:
    - Subscription doesn't specify service directly
@@ -1355,10 +1354,9 @@ th_subscription_t *subscription_create_from_service(
 **Key Differences from Channel-Based**:
 
 1. **Service Association**:
-   ```c
-   s->ths_service = prch->prch_id;  // prch->prch_id is service_t*
-   s->ths_channel = NULL;           // No channel association
-   ```
+   - The subscription's `ths_service` field is set to the service from the profile chain
+   - The `ths_channel` field remains NULL (no channel association)
+   - This association is handled by the `subscription_create_from_channel_or_service()` helper function
 
 2. **Direct Service**:
    - Subscription specifies exact service
@@ -1436,10 +1434,9 @@ th_subscription_t *subscription_create_from_mux(
    ```
 
 2. **Mux Association**:
-   ```c
-   s->ths_raw_service = service;
-   LIST_INSERT_HEAD(&mm->mm_raw_subs, s, ths_mux_link);
-   ```
+   - The subscription's `ths_raw_service` field and `ths_mux_link` are managed internally
+   - Raw service is passed to the subscription creation helper function
+   - Mux subscription tracking is handled by the service and subscription infrastructure
 
 3. **Typical Flags**:
    ```c
@@ -1796,89 +1793,32 @@ void service_instance_list_clear(service_instance_list_t *sil)
 
 #### 10.4.3 Service Candidate Evaluation
 
-**Function**: `service_find_instance()`
+**Service Instance Selection Process**
 
-**Purpose**: Find the best service instance for a subscription
+Service instance selection is handled through a combination of functions and service virtual methods rather than a single `service_find_instance()` function:
 
-**Signature**:
-```c
-service_instance_t *service_find_instance(
-  service_t *s,                  // Service (may be NULL if channel-based)
-  channel_t *ch,                 // Channel (may be NULL if service-based)
-  tvh_input_t *ti,               // Preferred input (NULL = any)
-  profile_chain_t *prch,         // Profile chain
-  service_instance_list_t *sil,  // Output: instance list
-  int *error,                    // Output: error code
-  int weight,                    // Subscription weight
-  int flags,                     // Subscription flags
-  int timeout,                   // Timeout in seconds
-  int postpone                   // Postpone duration in seconds
-);
-```
+1. **Instance List Management**: Each subscription maintains a `service_instance_list_t` in the `ths_instances` field
 
-**Evaluation Process**:
+2. **Service Enumeration**: Services implement an `s_enlist()` virtual method that populates the instance list with available input sources
 
-1. **Mark Phase**: Mark all existing instances
-   ```c
-   TAILQ_FOREACH(si, sil, si_link)
-     si->si_mark = 1;
-   ```
+3. **Instance Addition**: The `service_instance_add()` function adds candidate sources to the list with priority and weight information
 
-2. **Service Enumeration**:
-   - If channel specified: enumerate all services mapped to channel
-   - If service specified: use that service directly
-   - For each service, call `s_enlist()` virtual method
+4. **Mark-and-Sweep**: The `si_mark` field is used to track valid instances during re-enumeration
 
-3. **Input Enumeration** (in `s_enlist()`):
-   ```c
-   // For each input that can provide this service
-   LIST_FOREACH(input, &inputs, ti_link) {
-     // Check if input is enabled for this service
-     if (!input->mi_is_enabled(input, mux, flags, weight))
-       continue;
-     
-     // Get priority and weight
-     int prio = input->mi_get_priority(input, mux, flags);
-     int inst = input->mi_instance;
-     
-     // Add to instance list
-     si = service_instance_add(sil, service, inst, source, prio, weight);
-     si->si_mark = 0;  // Unmark (still valid)
-   }
-   ```
-
-4. **Sweep Phase**: Remove unmarked instances
-   ```c
-   TAILQ_FOREACH_SAFE(si, sil, si_link, next) {
-     if (si->si_mark) {
-       // Instance no longer valid, remove
-       service_instance_destroy(sil, si);
-     }
-   }
-   ```
-
-5. **Selection**: Choose best instance
-   ```c
-   TAILQ_FOREACH(si, sil, si_link) {
-     // Skip if error too recent
-     if (si->si_error && si->si_error_time + 60 > time(NULL))
-       continue;
-     
-     // Skip if input busy with higher priority
-     if (si->si_weight > weight)
-       continue;
-     
-     // This is the best available instance
-     return si;
-   }
-   ```
+5. **Instance Selection**: The subscription scheduler iterates through the sorted instance list to find the best available source
 
 **Selection Criteria** (in order):
 
-1. **Priority**: Higher `si_prio` preferred
-2. **Error History**: Avoid instances with recent errors
-3. **Weight**: Avoid instances busy with higher priority subscriptions
-4. **Order**: First suitable instance in sorted list
+1. **Priority**: Higher `si_prio` preferred (instances are kept sorted)
+2. **Error History**: Instances with recent errors are skipped
+3. **Weight**: Instances busy with higher priority subscriptions are avoided
+4. **Order**: First suitable instance in the sorted list is selected
+
+The actual selection logic is distributed across:
+- `subscription_reschedule()` in `src/subscriptions.c` (scheduler)
+- `subscription_start_instance()` in `src/subscriptions.c` (instance selection)
+- Service-specific `s_enlist()` implementations (instance enumeration)
+- `service_instance_add()` in `src/service.c` (instance list management)
 
 #### 10.4.4 Weight and Priority Handling
 

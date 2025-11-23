@@ -1559,4 +1559,4 @@ When modifying legacy code, document:
 
 ---
 
-[Table of Contents](00-TOC.md) | [Next →](21-Development-Guidelines.md)
+[← Previous](19-Configuration-Persistence.md) | [Table of Contents](00-TOC.md) | [Next →](21-Development-Guidelines.md)

@@ -791,10 +791,11 @@ For questions about documentation maintenance:
 
 ### 23.12.2 Resources
 
-**Tvheadend Resources:**
-- GitHub: https://github.com/tvheadend/tvheadend
-- Forums: https://tvheadend.org/projects/tvheadend/boards
-- Wiki: https://tvheadend.org/projects/tvheadend/wiki
+**Official Tvheadend Resources:**
+- **User Documentation**: [https://docs.tvheadend.org](https://docs.tvheadend.org)
+- **GitHub Repository**: [https://github.com/tvheadend/tvheadend](https://github.com/tvheadend/tvheadend)
+- **Issue Tracker**: [https://github.com/tvheadend/tvheadend/issues](https://github.com/tvheadend/tvheadend/issues)
+- **Forum**: [https://tvheadend.org](https://tvheadend.org)
 
 **Documentation Resources:**
 - Markdown Guide: https://www.markdownguide.org/

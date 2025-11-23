@@ -225,10 +225,10 @@ typedef struct passwd_entry {
 ```
 
 **Password Storage**:
-- Passwords stored as SHA-256 hashes (not plaintext)
-- Format: `{SHA256}base64(sha256(password))`
-- Legacy format: `{SHA1}base64(sha1(password))`
-- Plain passwords automatically hashed on save
+- Passwords stored with base64 encoding (not plaintext)
+- Format: `TVHeadend-Hide-` prefix + base64 encoded password
+- Stored in `pw_password` field with obfuscated format in `pw_password2`
+- Passwords are encoded on save for basic obfuscation
 
 **Authentication Tokens**:
 - `pw_auth`: Unique token ID for token-based authentication
@@ -1139,11 +1139,10 @@ access_destroy(access);
 ```
 
 **Ticket Expiration**:
-- Configurable timeout (30-3600 seconds)
-- Default: 300 seconds (5 minutes)
-- Set via `config.ticket_expires`
+- Tickets use timer-based expiration via `mtimer_t at_timer` field
 - Tickets automatically deleted on expiration
 - Timer-based cleanup
+- (Note: Specific timeout configuration details not verified in source code)
 
 **Ticket Reuse**:
 - System checks for existing tickets before creating new ones
@@ -1478,19 +1477,16 @@ access_set_prefix(&ae->ae_ipmasks, "192.168.0.0/16,10.0.0.0/8,172.16.0.0/12");
 
 **Default Local Networks**:
 
-Tvheadend provides a default set of local network ranges:
+Tvheadend provides a default IP mask initialization:
 
 ```c
-// Default local networks (RFC 1918 private addresses)
+// Default IP mask initialization
 access_set_prefix_default(&ae->ae_ipmasks);
 
-// Adds:
-// - 192.168.0.0/16 (192.168.x.x)
-// - 10.0.0.0/8 (10.x.x.x)
-// - 172.16.0.0/12 (172.16.x.x - 172.31.x.x)
-// - 127.0.0.0/8 (localhost)
-// - ::1/128 (IPv6 localhost)
-// - fe80::/10 (IPv6 link-local)
+// Creates empty IPv4 and IPv6 entries:
+// - One empty IPv4 entry (ai_family = AF_INET)
+// - One empty IPv6 entry (ai_family = AF_INET6)
+// Note: Specific network ranges must be configured by the user
 ```
 
 **Access Entry Matching**:
@@ -1790,33 +1786,40 @@ typedef struct access {
 
 ```c
 // Check if user can access channel
-int channel_access(channel_t *ch, access_t *perm, int readonly)
+// Note: Function does not explicitly check ACCESS_STREAMING permission
+int channel_access(channel_t *ch, access_t *a, int disabled)
 {
-  uint64_t chnum;
-  int i;
-  
-  // Check basic streaming permission
-  if (access_verify2(perm, ACCESS_STREAMING))
-    return 0;  // No streaming permission
-  
-  // Check channel number range
-  if (perm->aa_chrange) {
-    chnum = channel_get_number(ch);
-    
-    // Check each range pair
-    for (i = 0; i < perm->aa_chrange_count; i += 2) {
-      if (chnum >= perm->aa_chrange[i] && chnum <= perm->aa_chrange[i+1])
-        break;  // Within range
-    }
-    
-    if (i >= perm->aa_chrange_count)
-      return 0;  // Not in any range
+  if (!a)
+    return 0;
+
+  if (!ch) {
+    // If user has full rights, allow access to removed channels
+    if (a->aa_chrange == NULL && a->aa_chtags == NULL &&
+        a->aa_chtags_exclude == NULL)
+      return 1;
+    return 0;
   }
-  
-  // Check channel tags (see next section)
-  if (perm->aa_chtags || perm->aa_chtags_exclude) {
-    if (!channel_tag_access(ch, perm))
-      return 0;  // Tag restriction
+
+  if (!disabled && !ch->ch_enabled)
+    return 0;
+
+  // Check channel number range
+  if (a->aa_chrange) {
+    int64_t chnum = channel_get_number(ch);
+    int i;
+    for (i = 0; i < a->aa_chrange_count; i += 2)
+      if (chnum < a->aa_chrange[i] || chnum > a->aa_chrange[i+1])
+        return 0;
+  }
+
+  // Check channel tag restrictions
+  if (a->aa_chtags_exclude) {
+    // Check excluded tags
+    // (implementation details in source)
+  }
+  if (a->aa_chtags) {
+    // Check included tags
+    // (implementation details in source)
   }
   
   return 1;  // Access granted
@@ -1972,7 +1975,7 @@ int channel_tag_access(channel_t *ch, access_t *perm)
 
 #### 18.5.3 DVR Access Control
 
-**Location**: `src/dvr/dvr.c`
+**Location**: `src/dvr/dvr_db.c`
 
 DVR access control determines which recordings a user can view and modify.
 
@@ -2025,39 +2028,27 @@ typedef struct access {
 
 ```c
 // Check if user can access DVR entry
-int dvr_entry_access(dvr_entry_t *de, access_t *perm, int readonly)
+// Note: Function is named dvr_entry_verify(), not dvr_entry_access()
+int dvr_entry_verify(dvr_entry_t *de, access_t *a, int readonly)
 {
-  // Check basic DVR permission
-  if (access_verify2(perm, ACCESS_RECORDER))
-    return 0;  // No DVR permission
-  
-  // Check if entry is failed
-  if (de->de_sched_state == DVR_MISSED || 
-      de->de_sched_state == DVR_NOSTATE) {
-    // Requires failed recorder permission
-    if (access_verify2(perm, ACCESS_FAILED_RECORDER))
-      return 0;
-  }
-  
+  // Check failed recorder permission
+  if (access_verify2(a, ACCESS_FAILED_RECORDER) &&
+      dvr_entry_is_finished(de, DVR_FINISHED_FAILED))
+    return -1;
+
+  // Check read-only access with all-recorder permission
+  if (readonly && !access_verify2(a, ACCESS_ALL_RECORDER))
+    return 0;
+
+  // Check read-write access with all-rw-recorder permission
+  if (!access_verify2(a, ACCESS_ALL_RW_RECORDER))
+    return 0;
+
   // Check ownership
-  if (strcmp(de->de_owner ?: "", perm->aa_username ?: "")) {
-    // Not owner, check all-recorder permission
-    if (access_verify2(perm, ACCESS_ALL_RECORDER))
-      return 0;
+  if (strcmp(de->de_owner ?: "", a->aa_username ?: ""))
+    return -1;
     
-    // Check read-write permission for modifications
-    if (!readonly && access_verify2(perm, ACCESS_ALL_RW_RECORDER))
-      return 0;
-  }
-  
-  // Check DVR configuration restriction
-  if (perm->aa_dvrcfgs) {
-    if (access_verify_list(perm->aa_dvrcfgs, 
-                           idnode_uuid_as_str(&de->de_config->dvr_id)))
-      return 0;  // DVR config not allowed
-  }
-  
-  return 1;  // Access granted
+  return 0;  // Access granted
 }
 ```
 
@@ -2137,24 +2128,13 @@ typedef struct access {
 
 **Profile Access Verification**:
 
-```c
-// Check if user can use profile
-int profile_access(profile_t *pro, access_t *perm)
-{
-  // Check advanced streaming permission (required for profiles)
-  if (access_verify2(perm, ACCESS_ADVANCED_STREAMING))
-    return 0;  // No advanced streaming permission
-  
-  // Check profile restriction
-  if (perm->aa_profiles) {
-    if (access_verify_list(perm->aa_profiles, 
-                           idnode_uuid_as_str(&pro->pro_id)))
-      return 0;  // Profile not allowed
-  }
-  
-  return 1;  // Access granted
-}
-```
+Profile access verification is integrated into the streaming subsystem rather than a standalone function. Profile restrictions are checked by:
+
+1. Verifying `ACCESS_ADVANCED_STREAMING` permission for profile usage
+2. Checking the `aa_profiles` list in the `access_t` structure
+3. Using `access_verify_list()` to validate profile UUIDs
+
+(Note: No standalone `profile_access()` function exists in the codebase)
 
 **Profile Restriction Use Cases**:
 
@@ -3017,4 +2997,4 @@ htsmsg_t *htsp_method_subscribe(htsp_connection_t *htsp, htsmsg_t *in)
 
 ---
 
-[← Previous: SATIP Server](17-SATIP-Server.md) | [Table of Contents](00-TOC.md) | [Next: Configuration Persistence →](19-Configuration-Persistence.md)
+[← Previous](17-SATIP-Server.md) | [Table of Contents](00-TOC.md) | [Next →](19-Configuration-Persistence.md)
