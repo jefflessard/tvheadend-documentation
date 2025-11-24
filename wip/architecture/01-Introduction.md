@@ -1,6 +1,10 @@
-## 1. Introduction
 
 [← Back to Table of Contents](00-TOC.md)
+
+> ⚠️ **AI-Generated Content**  
+> This architecture documentation was generated with the assistance of AI tools. While efforts have been made to ensure accuracy through code analysis and review, AI-generated content can contain errors or inaccuracies. Readers should verify critical information against the actual source code and consult with project maintainers when in doubt. Contributions to correct or improve this documentation are welcome.
+
+## 1. Introduction
 
 ### 1.1 About Tvheadend
 
